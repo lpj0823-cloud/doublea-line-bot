@@ -434,8 +434,14 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
 
-    # TODO: 暫時跳過簽章驗證，確認 LINE 能連到伺服器後再還原
-    print(f"[DoubleA] webhook hit — sig={signature[:15]} body_len={len(body)}")
+    sig_value = signature.removeprefix("sha256=")
+    computed = base64.b64encode(
+        hmac.new(LINE_CHANNEL_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+    ).decode("utf-8")
+    print(f"[DoubleA] sig_received={sig_value[:15]} sig_computed={computed[:15]} body_len={len(body)}")
+    if not hmac.compare_digest(computed, sig_value):
+        print("[DoubleA] signature mismatch — rejecting")
+        raise HTTPException(status_code=400, detail="Invalid signature")
 
     try:
         payload = json.loads(body.decode("utf-8"))
