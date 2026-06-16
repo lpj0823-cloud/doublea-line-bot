@@ -443,7 +443,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:
         events = parser.parse(body.decode("utf-8"), signature)
     except InvalidSignatureError:
-        print(f"[DoubleA] InvalidSignatureError — secret_len={len(LINE_CHANNEL_SECRET)}")
+        print(f"[DoubleA] InvalidSignatureError — secret_len={len(LINE_CHANNEL_SECRET)} secret_prefix={LINE_CHANNEL_SECRET[:4]}")
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     for event in events:
