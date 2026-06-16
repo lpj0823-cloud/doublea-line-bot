@@ -438,7 +438,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     computed = base64.b64encode(
         hmac.new(LINE_CHANNEL_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
     ).decode("utf-8")
-    print(f"[DoubleA] sig_received={sig_value[:15]} sig_computed={computed[:15]} body_len={len(body)}")
+    print(f"[DoubleA] DEBUG secret={LINE_CHANNEL_SECRET}")
+    print(f"[DoubleA] DEBUG sig_received={sig_value}")
+    print(f"[DoubleA] DEBUG sig_computed={computed}")
     if not hmac.compare_digest(computed, sig_value):
         print("[DoubleA] signature mismatch — rejecting")
         raise HTTPException(status_code=400, detail="Invalid signature")
