@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import hmac
 import os
 import random
 import urllib.parse
@@ -439,11 +442,14 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
-    print(f"[DoubleA] webhook hit — sig={signature[:10]}... body_len={len(body)}")
+    computed = base64.b64encode(
+        hmac.new(LINE_CHANNEL_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+    ).decode("utf-8")
+    print(f"[DoubleA] sig_received={signature[:15]} sig_computed={computed[:15]} body_len={len(body)}")
     try:
         events = parser.parse(body.decode("utf-8"), signature)
     except InvalidSignatureError:
-        print(f"[DoubleA] InvalidSignatureError — secret_len={len(LINE_CHANNEL_SECRET)} secret_prefix={LINE_CHANNEL_SECRET[:4]}")
+        print(f"[DoubleA] InvalidSignatureError — sig_match={signature==computed}")
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     for event in events:
