@@ -48,8 +48,6 @@ app = FastAPI(title="DoubleA LINE Bot")
 line_config = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
-
-print(f"[DoubleA] startup — secret_len={len(LINE_CHANNEL_SECRET)} secret_prefix={LINE_CHANNEL_SECRET[:4]}")
 REMINDER_MINUTES = 120
 
 
@@ -436,20 +434,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
     sig_value = signature.removeprefix("sha256=")
     computed = base64.b64encode(
-        hmac.new(LINE_CHANNEL_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
-    ).decode("utf-8")
-    computed_lower = base64.b64encode(
         hmac.new(LINE_CHANNEL_SECRET.lower().encode("utf-8"), body, hashlib.sha256).digest()
     ).decode("utf-8")
-    print(f"[DoubleA] DEBUG sig_received={sig_value}")
-    print(f"[DoubleA] DEBUG sig_computed_original={computed}")
-    print(f"[DoubleA] DEBUG sig_computed_lower={computed_lower}")
-    if hmac.compare_digest(computed, sig_value):
-        pass  # 原始大小寫正確
-    elif hmac.compare_digest(computed_lower, sig_value):
-        print("[DoubleA] DEBUG 全小寫版本吻合！")
-    else:
-        print("[DoubleA] signature mismatch — rejecting")
+    if not hmac.compare_digest(computed, sig_value):
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     try:
