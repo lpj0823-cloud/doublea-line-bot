@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import json
 import os
 import random
 import urllib.parse
@@ -10,7 +11,6 @@ import pytz
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     ApiClient,
     Configuration,
@@ -19,8 +19,6 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
 )
-from linebot.v3.webhook import WebhookParser
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 from calendar_service import create_calendar_event, list_events_for_date, update_calendar_event
 from event_parser import parse_message, parse_modification
@@ -47,7 +45,6 @@ LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"].strip()
 LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"].strip()
 
 app = FastAPI(title="DoubleA LINE Bot")
-parser = WebhookParser(LINE_CHANNEL_SECRET)
 line_config = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
@@ -86,14 +83,6 @@ def _reply_line(reply_token: str, text: str) -> None:
         print(f"[DoubleA] reply_message 失敗：{e}")
         raise
 
-
-def _get_chat_id(event: MessageEvent) -> str:
-    source = event.source
-    if hasattr(source, "group_id") and source.group_id:
-        return source.group_id
-    if hasattr(source, "room_id") and source.room_id:
-        return source.room_id
-    return source.user_id
 
 
 def _generate_share_link(ev: dict) -> str:
@@ -444,26 +433,30 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
+
     computed = base64.b64encode(
         hmac.new(LINE_CHANNEL_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
     ).decode("utf-8")
     print(f"[DoubleA] sig_received={signature[:15]} sig_computed={computed[:15]} body_len={len(body)}")
-    try:
-        events = parser.parse(body.decode("utf-8"), signature)
-    except InvalidSignatureError:
-        print(f"[DoubleA] InvalidSignatureError — sig_match={signature==computed}")
+
+    if not hmac.compare_digest(computed, signature):
+        print("[DoubleA] signature mismatch — rejecting")
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    for event in events:
-        if isinstance(event, MessageEvent) and isinstance(
-            event.message, TextMessageContent
-        ):
-            background_tasks.add_task(
-                process_message,
-                event.message.text.strip(),
-                _get_chat_id(event),
-                event.reply_token,
-            )
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except Exception as e:
+        print(f"[DoubleA] body parse error: {e}")
+        raise HTTPException(status_code=400, detail="Invalid body")
+
+    for event in payload.get("events", []):
+        if event.get("type") == "message" and event.get("message", {}).get("type") == "text":
+            text = event["message"]["text"].strip()
+            source = event.get("source", {})
+            chat_id = source.get("groupId") or source.get("roomId") or source.get("userId", "")
+            reply_token = event.get("replyToken")
+            background_tasks.add_task(process_message, text, chat_id, reply_token)
+
     return JSONResponse(content={"status": "ok"})
 
 
