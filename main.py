@@ -51,6 +51,8 @@ parser = WebhookParser(LINE_CHANNEL_SECRET)
 line_config = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
+
+print(f"[DoubleA] startup — secret_len={len(LINE_CHANNEL_SECRET)} secret_prefix={LINE_CHANNEL_SECRET[:4]}")
 REMINDER_MINUTES = 120
 
 
