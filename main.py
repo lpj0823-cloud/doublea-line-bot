@@ -40,8 +40,8 @@ from todo_service import (
 
 load_dotenv()
 
-LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
-LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"].strip()
+LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"].strip()
 
 app = FastAPI(title="DoubleA LINE Bot")
 parser = WebhookParser(LINE_CHANNEL_SECRET)
@@ -439,9 +439,11 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     signature = request.headers.get("X-Line-Signature", "")
     body = await request.body()
+    print(f"[DoubleA] webhook hit — sig={signature[:10]}... body_len={len(body)}")
     try:
         events = parser.parse(body.decode("utf-8"), signature)
     except InvalidSignatureError:
+        print(f"[DoubleA] InvalidSignatureError — secret_len={len(LINE_CHANNEL_SECRET)}")
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     for event in events:
