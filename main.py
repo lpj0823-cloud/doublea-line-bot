@@ -120,7 +120,7 @@ def _format_calendar_confirmation(event_data: dict, event_link: str) -> str:
         f"【{event_data['title']}】\n"
         f"🗓 {date_str}{location_line}"
         f"{link_line}\n\n"
-        f"✅ Angel 已收到邀請\n"
+        f"✅ Ginny 已收到邀請\n"
         f"⏰ 將於開始前 2 小時提醒\n\n"
         f"📤 分享給其他人（點擊即可加入行事曆）\n{share_link}"
     )
@@ -142,7 +142,7 @@ def _format_multi_calendar_confirmation(results: list[dict]) -> str:
             f"   🔗 {r['link']}\n"
             f"   📤 {share_link}"
         )
-    lines.append("\n✅ Angel 已收到邀請\n⏰ 將於各活動開始前 2 小時提醒")
+    lines.append("\n✅ Ginny 已收到邀請\n⏰ 將於各活動開始前 2 小時提醒")
     return "\n\n".join(lines)
 
 

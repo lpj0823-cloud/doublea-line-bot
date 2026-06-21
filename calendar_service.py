@@ -49,7 +49,7 @@ def list_events_for_date(date: datetime) -> list[dict]:
 
 
 def create_calendar_event(event_data: dict) -> dict:
-    """Create a Google Calendar event and invite Angel. Returns {"id": ..., "link": ...}"""
+    """Create a Google Calendar event and invite Ginny. Returns {"id": ..., "link": ...}"""
     service = build("calendar", "v3", credentials=get_credentials())
 
     body: dict = {
