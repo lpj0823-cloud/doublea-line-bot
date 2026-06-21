@@ -7,7 +7,7 @@ from googleapiclient.discovery import build
 from google_auth import get_credentials
 
 CALENDAR_ID = os.getenv("CALENDAR_ID", "primary")
-WIFE_EMAIL = "Ginnyhuang@yahoo.com"
+WIFE_EMAIL = "Ginnycyhuang@gmail.com"
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
 
 
