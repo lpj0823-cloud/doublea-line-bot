@@ -102,7 +102,7 @@ def _reply_line(reply_token: str, text: str) -> None:
 
 
 def morning_briefing_job() -> None:
-    """每日 07:00 排程：查詢今日 Google 行事曆並主動推送到 LINE 群組。"""
+    """每日 07:00 排程：查詢今日 Google 行事曆 + 天氣，推送到 LINE 群組。"""
     chat_id = load_chat_id()
     if not chat_id:
         print("[DoubleA] 早安排程：找不到 chat_id，略過")
@@ -128,11 +128,26 @@ def morning_briefing_job() -> None:
             lines.append(f"📅 {time_part}【{ev['title']}】{loc_part}")
         msg = "\n".join(lines)
 
+    # 附加今日天氣（失敗不影響行程主訊息）
+    try:
+        current = get_current_weather()
+        forecasts = get_daily_forecast(1)
+        if forecasts:
+            fc = forecasts[0]
+            pop_str = f"🌂 {fc['pop']}%" if fc["pop"] > 0 else "☀️ 不下雨"
+            msg += (
+                f"\n\n─────────────\n"
+                f"🌦 今日天氣｜{current['emoji']} {current['description']}\n"
+                f"🌡 現在 {current['temp']}°C，今日 {fc['temp_min']}～{fc['temp_max']}°C　{pop_str}"
+            )
+    except Exception as e:
+        print(f"[DoubleA] 早安排程：天氣取得失敗 {e}")
+
     try:
         _push_line(chat_id, msg)
-        print(f"[DoubleA] 早安行程通知已發送：{len(events)} 筆行程")
+        print(f"[DoubleA] 早安通知已發送：{len(events)} 筆行程")
     except Exception as e:
-        print(f"[DoubleA] 早安行程通知發送失敗：{e}")
+        print(f"[DoubleA] 早安通知發送失敗：{e}")
 
 
 def daily_reminder_job() -> None:
