@@ -78,6 +78,8 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"].strip()
 
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
 REMINDER_MINUTES = 120
+BOT_NAME = "培正家AI小幫手"
+BOT_MENTION = f"@{BOT_NAME}"
 
 scheduler = AsyncIOScheduler(timezone=TAIPEI_TZ)
 
@@ -1281,13 +1283,22 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             continue
         msg = event.get("message", {})
         source = event.get("source", {})
+        source_type = source.get("type", "user")
         chat_id = source.get("groupId") or source.get("roomId") or source.get("userId", "")
         reply_token = event.get("replyToken")
 
         if msg.get("type") == "text":
             text = msg.get("text", "").strip()
-            if text:
-                background_tasks.add_task(process_message, text, chat_id, reply_token)
+            if not text:
+                continue
+            # 群組／聊天室：只有 @培正家AI小幫手 才回應
+            if source_type in ("group", "room"):
+                if BOT_MENTION not in text:
+                    continue
+                text = text.replace(BOT_MENTION, "").strip()
+                if not text:
+                    continue  # 只有 @ 沒有內容，靜默
+            background_tasks.add_task(process_message, text, chat_id, reply_token)
         elif msg.get("type") == "image":
             message_id = msg.get("id", "")
             if message_id:
