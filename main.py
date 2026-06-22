@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import random
 import urllib.parse
 from contextlib import asynccontextmanager
@@ -51,6 +52,13 @@ from todo_service import (
     complete_task_by_index,
     complete_task_by_keyword,
     get_pending_tasks,
+)
+from shopping_service import (
+    add_items,
+    clear_done,
+    get_items,
+    mark_done_by_index,
+    mark_done_by_keyword,
 )
 
 load_dotenv()
@@ -180,6 +188,44 @@ def _push_field_picker(chat_id: str, event_id: str, event_title: str) -> None:
         text=f"要修改【{event_title}】的哪個欄位？",
         quick_reply=QuickReply(items=qr_items),
     )
+    with ApiClient(line_config) as api_client:
+        MessagingApi(api_client).push_message(
+            PushMessageRequest(to=chat_id, messages=[msg])
+        )
+
+
+def _push_shopping_list(chat_id: str, items: list[dict]) -> None:
+    """顯示購物清單，並附上 Quick Reply 按鈕讓使用者標記已買。"""
+    pending = [it for it in items if not it["done"]]
+    done = [it for it in items if it["done"]]
+
+    if not pending and not done:
+        _push_line(chat_id, "🛒 購物清單是空的！\n\n用「+買 物品名稱」新增品項")
+        return
+
+    lines = ["🛒 購物清單\n"]
+    for i, it in enumerate(pending, 1):
+        lines.append(f"{i}. {it['name']}")
+    if done:
+        lines.append("")
+        for it in done:
+            lines.append(f"✅ {it['name']}")
+    if pending:
+        lines.append("\n點下方按鈕標記買到")
+
+    qr_items = []
+    for i, it in enumerate(pending, 1):
+        if len(qr_items) >= 12:
+            break
+        label = f"✅ {i}. {it['name']}"[:20]
+        qr_items.append(QuickReplyItem(action=MessageAction(label=label, text=f"買到 {i}")))
+    if done:
+        qr_items.append(QuickReplyItem(action=MessageAction(label="🗑 清除已買", text="清除已買")))
+
+    if qr_items:
+        msg = TextMessage(text="\n".join(lines), quick_reply=QuickReply(items=qr_items))
+    else:
+        msg = TextMessage(text="\n".join(lines))
     with ApiClient(line_config) as api_client:
         MessagingApi(api_client).push_message(
             PushMessageRequest(to=chat_id, messages=[msg])
@@ -534,6 +580,60 @@ def handle_command(text: str, chat_id: str) -> bool:
             hint = {"title": "（例如：家庭聚會）", "start": "（例如：明天下午3點）", "location": "（例如：教會）"}.get(field, "")
             save_pending_edit(chat_id, {"event_id": event_id, "field": field, "title": event_title})
             _push_line(chat_id, f"請輸入【{event_title}】的新{field_name}：\n{hint}\n\n輸入「取消」可放棄修改")
+        return True
+
+    # ── 購物清單 ──────────────────────────────────────────────────────────────
+
+    if text.startswith("+買 "):
+        raw = text[len("+買 "):]
+        names = [n.strip() for n in re.split(r"[,、\n]+", raw) if n.strip()]
+        try:
+            added = add_items(names)
+            if added:
+                _push_line(chat_id, "🛒 已加入購物清單：\n" + "\n".join(f"• {n}" for n in added))
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 新增失敗：{e}")
+        return True
+
+    if text.strip() == "購物清單":
+        try:
+            _push_shopping_list(chat_id, get_items())
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 無法取得購物清單：{e}")
+        return True
+
+    if text.strip() == "清除已買":
+        try:
+            count = clear_done()
+            if count:
+                _push_line(chat_id, f"✅ 已清除 {count} 個買完的品項")
+            else:
+                _push_line(chat_id, "❓ 沒有已買完的品項可清除")
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 清除失敗：{e}")
+        return True
+
+    if text.startswith("買到 "):
+        rest = text[len("買到 "):].strip()
+        try:
+            if rest.isdigit():
+                name = mark_done_by_index(int(rest))
+                not_found_msg = f"❓ 找不到第 {rest} 項"
+            else:
+                name = mark_done_by_keyword(rest)
+                not_found_msg = f"❓ 找不到包含「{rest}」的品項"
+
+            if not name:
+                _push_line(chat_id, not_found_msg)
+            else:
+                items = get_items()
+                pending = [it for it in items if not it["done"]]
+                if not pending:
+                    _push_line(chat_id, f"✅ 買到了：{name}\n\n🎉 全部買完了！輸入「清除已買」可清空清單。")
+                else:
+                    _push_shopping_list(chat_id, items)
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 標記失敗：{e}")
         return True
 
     return False
