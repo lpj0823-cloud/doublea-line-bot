@@ -60,6 +60,7 @@ from shopping_service import (
     mark_done_by_index,
     mark_done_by_keyword,
 )
+from notes_service import add_note, delete_note_by_index, get_notes
 
 load_dotenv()
 
@@ -226,6 +227,33 @@ def _push_shopping_list(chat_id: str, items: list[dict]) -> None:
         msg = TextMessage(text="\n".join(lines), quick_reply=QuickReply(items=qr_items))
     else:
         msg = TextMessage(text="\n".join(lines))
+    with ApiClient(line_config) as api_client:
+        MessagingApi(api_client).push_message(
+            PushMessageRequest(to=chat_id, messages=[msg])
+        )
+
+
+def _push_notes(chat_id: str, notes: list[dict]) -> None:
+    """顯示所有筆記，附 Quick Reply 按鈕刪除各筆。"""
+    if not notes:
+        _push_line(chat_id, "📓 筆記本是空的！\n\n用「+記 內容」新增筆記")
+        return
+
+    lines = [f"📓 筆記本（{len(notes)} 筆）\n"]
+    for i, note in enumerate(notes, 1):
+        lines.append(f"{i}. [{note['created_at']}]\n   {note['content']}")
+
+    qr_items = []
+    for i, note in enumerate(notes, 1):
+        if len(qr_items) >= 13:
+            break
+        label = f"🗑 {i}. {note['content']}"[:20]
+        qr_items.append(QuickReplyItem(action=MessageAction(label=label, text=f"刪筆記 {i}")))
+
+    if qr_items:
+        msg = TextMessage(text="\n\n".join(lines), quick_reply=QuickReply(items=qr_items))
+    else:
+        msg = TextMessage(text="\n\n".join(lines))
     with ApiClient(line_config) as api_client:
         MessagingApi(api_client).push_message(
             PushMessageRequest(to=chat_id, messages=[msg])
@@ -634,6 +662,42 @@ def handle_command(text: str, chat_id: str) -> bool:
                     _push_shopping_list(chat_id, items)
         except Exception as e:
             _push_line(chat_id, f"⚠️ 標記失敗：{e}")
+        return True
+
+    # ── 記事本 ────────────────────────────────────────────────────────────────
+
+    if text.startswith("+記"):
+        content = text[len("+記"):].strip()
+        if not content:
+            _push_line(chat_id, "❓ 請輸入筆記內容，例如：+記 重要事項")
+            return True
+        try:
+            note = add_note(content)
+            _push_line(chat_id, f"📓 已記下：\n\n{note['content']}")
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 新增失敗：{e}")
+        return True
+
+    if text.strip() == "筆記":
+        try:
+            _push_notes(chat_id, get_notes())
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 無法取得筆記：{e}")
+        return True
+
+    if text.startswith("刪筆記 "):
+        rest = text[len("刪筆記 "):].strip()
+        if rest.isdigit():
+            try:
+                removed = delete_note_by_index(int(rest))
+                if removed:
+                    _push_line(chat_id, f"🗑 已刪除筆記：\n\n{removed}")
+                else:
+                    _push_line(chat_id, f"❓ 找不到第 {rest} 筆筆記")
+            except Exception as e:
+                _push_line(chat_id, f"⚠️ 刪除失敗：{e}")
+        else:
+            _push_line(chat_id, "❓ 請輸入筆記編號，例如：刪筆記 1")
         return True
 
     return False
