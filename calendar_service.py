@@ -95,6 +95,60 @@ def list_events_for_range(start_date: datetime, end_date: datetime) -> list[dict
     return events
 
 
+def list_upcoming_events(days: int = 7) -> list[dict]:
+    """列出今天起 N 天內的所有行事曆事件，包含 id 欄位。"""
+    service = build("calendar", "v3", credentials=get_credentials())
+    now = datetime.now(TAIPEI_TZ)
+    range_start = TAIPEI_TZ.localize(datetime(now.year, now.month, now.day, 0, 0, 0))
+    range_end = range_start + timedelta(days=days)
+
+    result = (
+        service.events()
+        .list(
+            calendarId=CALENDAR_ID,
+            timeMin=range_start.isoformat(),
+            timeMax=range_end.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+
+    events = []
+    for item in result.get("items", []):
+        title = item.get("summary", "（無標題）")
+        start = item["start"].get("dateTime") or item["start"].get("date", "")
+        location = item.get("location") or ""
+        try:
+            dt = datetime.fromisoformat(start)
+            if dt.tzinfo is None:
+                dt = TAIPEI_TZ.localize(dt)
+            else:
+                dt = dt.astimezone(TAIPEI_TZ)
+            date_str = dt.strftime("%-m/%-d")
+            start_str = dt.strftime("%H:%M")
+        except ValueError:
+            date_str = start[:10]
+            start_str = ""
+        events.append({
+            "id": item["id"],
+            "title": title,
+            "date_str": date_str,
+            "start_str": start_str,
+            "location": location,
+        })
+    return events
+
+
+def delete_event_by_id(event_id: str) -> str:
+    """以 Google Calendar event ID 直接刪除事件。回傳被刪除的標題。"""
+    service = build("calendar", "v3", credentials=get_credentials())
+    event = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+    title = event.get("summary", "（無標題）")
+    service.events().delete(calendarId=CALENDAR_ID, eventId=event_id, sendUpdates="all").execute()
+    return title
+
+
 def find_and_delete_event(
     target_dt: datetime,
     has_time: bool = True,

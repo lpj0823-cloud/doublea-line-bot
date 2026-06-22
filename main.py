@@ -17,13 +17,16 @@ from fastapi.responses import JSONResponse
 from linebot.v3.messaging import (
     ApiClient,
     Configuration,
+    MessageAction,
     MessagingApi,
     PushMessageRequest,
+    QuickReply,
+    QuickReplyItem,
     ReplyMessageRequest,
     TextMessage,
 )
 
-from calendar_service import create_calendar_event, find_and_delete_event, find_and_update_event, list_events_for_date, list_events_for_range, update_calendar_event
+from calendar_service import create_calendar_event, delete_event_by_id, find_and_delete_event, find_and_update_event, list_events_for_date, list_events_for_range, list_upcoming_events, update_calendar_event
 from weather_service import get_current_weather, get_daily_forecast
 from event_parser import parse_message, parse_modification
 from state_service import (
@@ -99,6 +102,29 @@ def _reply_line(reply_token: str, text: str) -> None:
         print(f"[DoubleA] reply_message 失敗：{e}")
         raise
 
+
+
+def _push_delete_picker(chat_id: str, events: list[dict]) -> None:
+    """發送含 Quick Reply 按鈕的行程選擇訊息。"""
+    lines = ["以下是未來 7 天的行程，請點選要刪除的：\n"]
+    qr_items = []
+    for ev in events:
+        time_part = f"{ev['start_str']} " if ev.get("start_str") else ""
+        lines.append(f"📅 {ev['date_str']} {time_part}【{ev['title']}】")
+        if len(qr_items) < 13:  # LINE Quick Reply 上限 13 個
+            label = f"{ev['date_str']} {time_part}{ev['title']}"[:20]
+            qr_items.append(
+                QuickReplyItem(action=MessageAction(label=label, text=f"確認刪除 {ev['id']}"))
+            )
+
+    msg = TextMessage(
+        text="\n".join(lines),
+        quick_reply=QuickReply(items=qr_items),
+    )
+    with ApiClient(line_config) as api_client:
+        MessagingApi(api_client).push_message(
+            PushMessageRequest(to=chat_id, messages=[msg])
+        )
 
 
 def morning_briefing_job() -> None:
@@ -392,6 +418,26 @@ def handle_command(text: str, chat_id: str) -> bool:
             _push_line(chat_id, "❓ 格式錯誤，請輸入「del 1」")
         except Exception as e:
             _push_line(chat_id, f"⚠️ 標記失敗：{e}")
+        return True
+
+    if text.strip() == "刪除行程":
+        try:
+            events = list_upcoming_events(days=7)
+            if not events:
+                _push_line(chat_id, "📅 未來 7 天沒有行程可以刪除。")
+            else:
+                _push_delete_picker(chat_id, events)
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 無法取得行程：{e}")
+        return True
+
+    if text.startswith("確認刪除 "):
+        event_id = text.split("確認刪除 ", 1)[1].strip()
+        try:
+            title = delete_event_by_id(event_id)
+            _push_line(chat_id, f"✅ 已刪除：【{title}】")
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 刪除失敗：{e}")
         return True
 
     return False
