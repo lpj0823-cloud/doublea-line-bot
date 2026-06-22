@@ -1168,6 +1168,7 @@ def _download_line_content(message_id: str) -> tuple[bytes, str]:
 
 def process_image(message_id: str, chat_id: str, reply_token: str | None = None) -> None:
     """背景任務：下載圖片 → Gemini Vision 分析 → 若偵測到行事曆事件則建立並回覆。"""
+    print(f"[DoubleA] process_image 開始：message_id={message_id} chat_id={chat_id}")
     save_chat_id(chat_id)
     now = datetime.now(TAIPEI_TZ)
 
@@ -1186,12 +1187,19 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
         except Exception as _e:
             print(f"[DoubleA] image push 最終失敗：{_e}")
 
+    # 立即通知使用者圖片已收到
+    try:
+        _push_line(chat_id, "⏳ 圖片收到，正在分析中...")
+    except Exception as e:
+        print(f"[DoubleA] 分析中通知失敗：{e}")
+
     # 1. 下載圖片
     try:
         image_bytes, mime_type = _download_line_content(message_id)
         print(f"[DoubleA] 圖片下載完成：{len(image_bytes)} bytes，{mime_type}")
     except Exception as e:
         print(f"[DoubleA] 圖片下載失敗：{e}")
+        _respond("⚠️ 圖片下載失敗，請稍後再試。")
         return
 
     # 2. Gemini Vision 分析
@@ -1200,9 +1208,11 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
         print(f"[DoubleA] 圖片分析結果：{result.get('type')}，{len(result.get('events', []))} 筆事件")
     except Exception as e:
         print(f"[DoubleA] 圖片 OCR 失敗：{e}")
+        _respond("⚠️ 圖片分析失敗，請稍後再試。")
         return
 
     if result.get("type") != "calendar":
+        print(f"[DoubleA] 圖片無行程，略過")
         return  # 無事件 → 完全靜默，不打擾群組
 
     events = result.get("events") or []
