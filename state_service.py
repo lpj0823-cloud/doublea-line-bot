@@ -23,14 +23,22 @@ def _get_db():
 
 
 def _fs_load_state() -> dict:
-    doc = _get_db().collection(FIRESTORE_COLLECTION).document(FIRESTORE_STATE_DOC).get()
-    return doc.to_dict() or {}
+    try:
+        doc = _get_db().collection(FIRESTORE_COLLECTION).document(FIRESTORE_STATE_DOC).get()
+        return doc.to_dict() or {}
+    except Exception as e:
+        print(f"[DoubleA] Firestore load_state 失敗，fallback JSON：{e}")
+        return _local_load_state()
 
 
 def _fs_save_state(data: dict) -> None:
-    _get_db().collection(FIRESTORE_COLLECTION).document(FIRESTORE_STATE_DOC).set(
-        data, merge=True
-    )
+    try:
+        _get_db().collection(FIRESTORE_COLLECTION).document(FIRESTORE_STATE_DOC).set(
+            data, merge=True
+        )
+    except Exception as e:
+        print(f"[DoubleA] Firestore save_state 失敗，fallback JSON：{e}")
+        _local_save_state(data)
 
 
 # ── Local file backend ────────────────────────────────────────────────────────
@@ -99,42 +107,50 @@ def add_reminder(chat_id: str, event_data: dict, reminder_dt: datetime) -> None:
         "sent": False,
     }
     if USE_FIRESTORE:
-        doc_id = f"{event_data['start']}_{chat_id}".replace(":", "-").replace("+", "p")
-        _get_db().collection(FIRESTORE_REMINDERS).document(doc_id).set(payload)
-    else:
-        payload["_id"] = len(_local_reminders)
-        _local_reminders.append(payload)
+        try:
+            doc_id = f"{event_data['start']}_{chat_id}".replace(":", "-").replace("+", "p")
+            _get_db().collection(FIRESTORE_REMINDERS).document(doc_id).set(payload)
+            return
+        except Exception as e:
+            print(f"[DoubleA] Firestore add_reminder 失敗，fallback 記憶體：{e}")
+    payload["_id"] = len(_local_reminders)
+    _local_reminders.append(payload)
 
 
 def get_due_reminders(now: datetime) -> list:
     if USE_FIRESTORE:
-        docs = (
-            _get_db()
-            .collection(FIRESTORE_REMINDERS)
-            .where("sent", "==", False)
-            .stream()
-        )
-        due = []
-        for doc in docs:
-            data = doc.to_dict()
-            data["_doc_id"] = doc.id
-            if datetime.fromisoformat(data["reminder_time"]) <= now:
-                due.append(data)
-        return due
-    else:
-        return [
-            r for r in _local_reminders
-            if not r["sent"] and datetime.fromisoformat(r["reminder_time"]) <= now
-        ]
+        try:
+            docs = (
+                _get_db()
+                .collection(FIRESTORE_REMINDERS)
+                .where("sent", "==", False)
+                .stream()
+            )
+            due = []
+            for doc in docs:
+                data = doc.to_dict()
+                data["_doc_id"] = doc.id
+                if datetime.fromisoformat(data["reminder_time"]) <= now:
+                    due.append(data)
+            return due
+        except Exception as e:
+            print(f"[DoubleA] Firestore get_due_reminders 失敗，fallback 記憶體：{e}")
+    return [
+        r for r in _local_reminders
+        if not r["sent"] and datetime.fromisoformat(r["reminder_time"]) <= now
+    ]
 
 
 def mark_reminder_sent(doc_id) -> None:
     if USE_FIRESTORE:
-        _get_db().collection(FIRESTORE_REMINDERS).document(doc_id).update({"sent": True})
-    else:
-        for r in _local_reminders:
-            if r.get("_id") == doc_id:
-                r["sent"] = True
+        try:
+            _get_db().collection(FIRESTORE_REMINDERS).document(doc_id).update({"sent": True})
+            return
+        except Exception as e:
+            print(f"[DoubleA] Firestore mark_reminder_sent 失敗，fallback 記憶體：{e}")
+    for r in _local_reminders:
+        if r.get("_id") == doc_id:
+            r["sent"] = True
 
 
 # ── Pending edit state ────────────────────────────────────────────────────────

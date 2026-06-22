@@ -15,12 +15,20 @@ def _get_db():
 # ── Firestore backend ─────────────────────────────────────────────────────────
 
 def _fs_load() -> dict:
-    doc = _get_db().collection(FIRESTORE_COLLECTION).document(FIRESTORE_DOC).get()
-    return doc.to_dict() or {"items": []}
+    try:
+        doc = _get_db().collection(FIRESTORE_COLLECTION).document(FIRESTORE_DOC).get()
+        return doc.to_dict() or {"items": []}
+    except Exception as e:
+        print(f"[DoubleA] Firestore shopping load 失敗，fallback JSON：{e}")
+        return _local_load()
 
 
 def _fs_save(data: dict) -> None:
-    _get_db().collection(FIRESTORE_COLLECTION).document(FIRESTORE_DOC).set(data)
+    try:
+        _get_db().collection(FIRESTORE_COLLECTION).document(FIRESTORE_DOC).set(data)
+    except Exception as e:
+        print(f"[DoubleA] Firestore shopping save 失敗，fallback JSON：{e}")
+        _local_save(data)
 
 
 # ── Local JSON backend ────────────────────────────────────────────────────────
