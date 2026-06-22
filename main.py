@@ -546,9 +546,12 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
                 _reply_line(reply_token, msg)
                 _used_reply[0] = True
                 return
-            except Exception:
-                pass  # 已記錄，fallback 到 push
-        _push_line(chat_id, msg)
+            except Exception as _e:
+                print(f"[DoubleA] reply 失敗，改用 push：{_e}")
+        try:
+            _push_line(chat_id, msg)
+        except Exception as _e:
+            print(f"[DoubleA] _respond push 最終失敗：{_e}")
 
     if handle_command(text, chat_id):
         return
@@ -564,6 +567,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
 
     if msg_type == "weather":
         period = result.get("period", "today")
+        print(f"[DoubleA] 天氣查詢開始：period={period}")
         try:
             if period == "today":
                 current = get_current_weather()
@@ -578,10 +582,11 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
             else:  # week
                 forecasts = get_daily_forecast(5)
                 reply = _format_weather_week(forecasts)
-            print(f"[DoubleA] 天氣查詢：{period}")
+            print(f"[DoubleA] 天氣查詢成功：{period}")
         except Exception as e:
-            print(f"[DoubleA] 天氣查詢錯誤：{e}")
+            print(f"[DoubleA] 天氣查詢錯誤：{type(e).__name__}: {e}")
             reply = "⚠️ 天氣查詢失敗，請稍後再試。"
+        print(f"[DoubleA] 天氣回覆中：{reply[:40]}")
         _respond(reply)
 
     elif msg_type == "edit":
