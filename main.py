@@ -5,9 +5,12 @@ import json
 import os
 import random
 import urllib.parse
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 import pytz
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -45,11 +48,24 @@ load_dotenv()
 LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"].strip()
 LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"].strip()
 
-app = FastAPI(title="DoubleA LINE Bot")
-line_config = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
-
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
 REMINDER_MINUTES = 120
+
+scheduler = AsyncIOScheduler(timezone=TAIPEI_TZ)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    scheduler.add_job(morning_briefing_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
+    scheduler.start()
+    print("[DoubleA] 排程器已啟動，每日 07:00 自動發送早安行程")
+    yield
+    scheduler.shutdown()
+    print("[DoubleA] 排程器已停止")
+
+
+app = FastAPI(title="DoubleA LINE Bot", lifespan=lifespan)
+line_config = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 
 
 # ── LINE push ─────────────────────────────────────────────────────────────────
@@ -82,6 +98,40 @@ def _reply_line(reply_token: str, text: str) -> None:
         print(f"[DoubleA] reply_message 失敗：{e}")
         raise
 
+
+
+def morning_briefing_job() -> None:
+    """每日 07:00 排程：查詢今日 Google 行事曆並主動推送到 LINE 群組。"""
+    chat_id = load_chat_id()
+    if not chat_id:
+        print("[DoubleA] 早安排程：找不到 chat_id，略過")
+        return
+
+    now = datetime.now(TAIPEI_TZ)
+    date_str = now.strftime("%-m月%-d日")
+
+    try:
+        events = list_events_for_date(now)
+    except Exception as e:
+        print(f"[DoubleA] 早安排程：行事曆取得失敗 {e}")
+        return
+
+    if not events:
+        msg = f"早安！☀️ 今天是 {date_str}\n\n今天沒有行程，祝您有美好的一天！"
+    else:
+        lines = [f"早安！☀️ 今天是 {date_str}，以下是今日行程：\n"]
+        for ev in events:
+            time_part = f"{ev['start_str']} " if ev.get("start_str") else ""
+            loc = ev.get("location", "")
+            loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
+            lines.append(f"📅 {time_part}【{ev['title']}】{loc_part}")
+        msg = "\n".join(lines)
+
+    try:
+        _push_line(chat_id, msg)
+        print(f"[DoubleA] 早安行程通知已發送：{len(events)} 筆行程")
+    except Exception as e:
+        print(f"[DoubleA] 早安行程通知發送失敗：{e}")
 
 
 def _generate_share_link(ev: dict) -> str:
