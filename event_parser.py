@@ -29,6 +29,12 @@ def parse_message(message: str, current_time: datetime) -> dict:
 
 ━━ 判斷規則 ━━
 
+【delete】刪除/取消行事曆活動意圖（如「刪除明天下午3點的會議」「取消今天5點的活動」「刪掉後天的牙醫」）
+→ 輸出：{{"type": "delete", "target_datetime": "ISO8601+08:00", "has_time": true, "title_hint": "會議"}}
+  - has_time: 使用者是否明確提到時間（true/false）
+  - title_hint: 活動名稱的關鍵字（如「會議」「牙醫」「課」）；通用詞（「活動」「行程」「事」）或無則填 null
+  - 若沒有指定時間，target_datetime 設為當天 00:00，has_time 設 false
+
 【query】查詢行事曆意圖（如「今天有什麼事」「明天的行程」「這週有什麼」「6月25日有什麼」「下週有沒有事」）
 → 輸出：{{"type": "query", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "label": "今天"}}
   - 單日查詢：start_date = end_date（同一天）
@@ -91,9 +97,12 @@ events 陣列格式：每筆事件 = {{"title": "中文標題10字內", "start":
             },
             "title":       {"type": "STRING"},
             "description": {"type": "STRING"},
-            "start_date":  {"type": "STRING"},
-            "end_date":    {"type": "STRING"},
-            "label":       {"type": "STRING"},
+            "start_date":       {"type": "STRING"},
+            "end_date":         {"type": "STRING"},
+            "label":            {"type": "STRING"},
+            "target_datetime":  {"type": "STRING"},
+            "has_time":         {"type": "BOOLEAN"},
+            "title_hint":       {"type": "STRING"},
         },
         "required": ["type"],
     }

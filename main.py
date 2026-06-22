@@ -20,7 +20,7 @@ from linebot.v3.messaging import (
     TextMessage,
 )
 
-from calendar_service import create_calendar_event, list_events_for_date, list_events_for_range, update_calendar_event
+from calendar_service import create_calendar_event, find_and_delete_event, list_events_for_date, list_events_for_range, update_calendar_event
 from event_parser import parse_message, parse_modification
 from state_service import (
     add_reminder,
@@ -326,11 +326,12 @@ _TASK_KEYWORDS = [
 ]
 _MODIFY_KEYWORDS = ["修正", "更改", "改一下", "調整", "修改", "改成", "改到"]
 _QUERY_KEYWORDS = ["有什麼事", "有什麼行程", "有什麼活動", "行程", "有沒有事", "有沒有行程", "查一下行程"]
+_DELETE_KEYWORDS = ["刪除", "刪掉", "取消", "移除"]
 
 
 def _should_notify(text: str) -> bool:
-    """本地快速判斷：是否有可能是行事曆/待辦/修改/查詢，值得先推送等待訊息。"""
-    for kw in _MODIFY_KEYWORDS:
+    """本地快速判斷：是否有可能是行事曆/待辦/修改/查詢/刪除，值得先推送等待訊息。"""
+    for kw in _MODIFY_KEYWORDS + _DELETE_KEYWORDS:
         if kw in text:
             return True
     time_hit = any(kw in text for kw in _TIME_KEYWORDS)
@@ -370,7 +371,24 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
     msg_type = result.get("type", "ignore")
     print(f"[DoubleA] 分類：{msg_type}　{result}")
 
-    if msg_type == "modify":
+    if msg_type == "delete":
+        target_dt_str = result.get("target_datetime", "")
+        has_time = result.get("has_time", True)
+        title_hint = result.get("title_hint") or None
+        try:
+            target_dt = datetime.fromisoformat(target_dt_str)
+            deleted = find_and_delete_event(target_dt, has_time, title_hint)
+            if deleted:
+                reply = f"✅ 已刪除：【{deleted}】"
+                print(f"[DoubleA] 行事曆刪除：{deleted}")
+            else:
+                reply = "❓ 找不到這個活動，請確認時間是否正確"
+        except Exception as e:
+            print(f"[DoubleA] 刪除錯誤：{e}")
+            reply = "⚠️ 刪除行事曆失敗，請稍後再試。"
+        _respond(reply)
+
+    elif msg_type == "modify":
         last = load_last_event()
         if not last:
             _respond("❓ 找不到最近的行事曆事件，無法修改")
