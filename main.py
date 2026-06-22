@@ -57,8 +57,9 @@ scheduler = AsyncIOScheduler(timezone=TAIPEI_TZ)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     scheduler.add_job(morning_briefing_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
+    scheduler.add_job(daily_reminder_job, CronTrigger(hour=17, minute=0, timezone=TAIPEI_TZ))
     scheduler.start()
-    print("[DoubleA] 排程器已啟動，每日 07:00 自動發送早安行程")
+    print("[DoubleA] 排程器已啟動：07:00 早安行程、17:00 待辦提醒")
     yield
     scheduler.shutdown()
     print("[DoubleA] 排程器已停止")
@@ -132,6 +133,52 @@ def morning_briefing_job() -> None:
         print(f"[DoubleA] 早安行程通知已發送：{len(events)} 筆行程")
     except Exception as e:
         print(f"[DoubleA] 早安行程通知發送失敗：{e}")
+
+
+def daily_reminder_job() -> None:
+    """每日 17:00 排程：推送未完成待辦 + 今晚剩餘行事曆到 LINE 群組。"""
+    chat_id = load_chat_id()
+    if not chat_id:
+        print("[DoubleA] 下午提醒排程：找不到 chat_id，略過")
+        return
+
+    now = datetime.now(TAIPEI_TZ)
+    sections = []
+
+    try:
+        cal_events = list_events_for_date(now)
+        remaining = [ev for ev in cal_events if ev.get("start_str", "") > "17:00"]
+        if remaining:
+            lines = ["📅 今晚行事曆\n"]
+            for ev in remaining:
+                loc = ev.get("location", "")
+                loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
+                lines.append(f"・{ev['start_str']} 【{ev['title']}】{loc_part}")
+            sections.append("\n".join(lines))
+    except Exception as e:
+        print(f"[DoubleA] 下午提醒排程：行事曆取得失敗 {e}")
+
+    try:
+        tasks = get_pending_tasks()
+        if tasks:
+            lines = ["📋 待辦提醒\n"]
+            for i, t in enumerate(tasks, 1):
+                lines.append(f"{i}. {t['title']}")
+            lines.append(f"\n🔗 {TASKS_URL}")
+            sections.append("\n".join(lines))
+    except Exception as e:
+        print(f"[DoubleA] 下午提醒排程：待辦取得失敗 {e}")
+
+    if not sections:
+        print("[DoubleA] 下午提醒排程：無待辦也無晚間行程，略過")
+        return
+
+    msg = "🌆 下午好！來看看今天還有什麼：\n\n" + "\n\n".join(sections)
+    try:
+        _push_line(chat_id, msg)
+        print(f"[DoubleA] 下午提醒已發送")
+    except Exception as e:
+        print(f"[DoubleA] 下午提醒發送失敗：{e}")
 
 
 def _generate_share_link(ev: dict) -> str:
