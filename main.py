@@ -1291,11 +1291,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             text = msg.get("text", "").strip()
             if not text:
                 continue
-            # 群組／聊天室：只有 @培正家AI小幫手 才回應
+            # 群組／聊天室：只有 @培正家AI小幫手 才回應（不分大小寫）
             if source_type in ("group", "room"):
-                if BOT_MENTION not in text:
+                if BOT_MENTION.lower() not in text.lower():
                     continue
-                text = text.replace(BOT_MENTION, "").strip()
+                text = re.sub(re.escape(BOT_MENTION), "", text, flags=re.IGNORECASE).strip()
                 if not text:
                     continue  # 只有 @ 沒有內容，靜默
             background_tasks.add_task(process_message, text, chat_id, reply_token)
