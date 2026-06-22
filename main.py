@@ -584,9 +584,9 @@ def handle_command(text: str, chat_id: str) -> bool:
 
     # ── 購物清單 ──────────────────────────────────────────────────────────────
 
-    if text.startswith("+買 "):
-        raw = text[len("+買 "):]
-        names = [n.strip() for n in re.split(r"[,、\n]+", raw) if n.strip()]
+    if text.startswith("+買"):
+        raw = text[len("+買"):].strip()
+        names = [n.strip() for n in re.split(r"[,、\n\s]+", raw) if n.strip()]
         try:
             added = add_items(names)
             if added:
