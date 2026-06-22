@@ -25,9 +25,13 @@ def parse_message(message: str, current_time: datetime) -> dict:
 
     prompt = f"""現在時間：{now_str}（台北時間，UTC+8）
 
-分析這則 LINE 訊息，輸出以下五種 JSON 格式之一。
+分析這則 LINE 訊息，輸出以下六種 JSON 格式之一。
 
 ━━ 判斷規則 ━━
+
+【weather】天氣查詢意圖（如「今天天氣怎樣」「明天會不會下雨」「這週天氣如何」「週末天氣」「會颱風嗎」）
+→ 輸出：{{"type": "weather", "period": "today"}}
+  - period: "today"（今天）、"tomorrow"（明天/後天/明後天）、"week"（這週/週末/未來幾天）
 
 【edit】修改特定行事曆活動（使用者指定了「目標事件」的時間或標題，並說明要改什麼）
 例：「把明天下午3點的會議改到4點」「把今天的禱告會改到教會」「把後天9點的課改到10點半」
@@ -115,6 +119,7 @@ events 陣列格式：每筆事件 = {{"title": "中文標題10字內", "start":
             "title_hint":       {"type": "STRING"},
             "new_start":        {"type": "STRING"},
             "new_location":     {"type": "STRING"},
+            "period":           {"type": "STRING"},
         },
         "required": ["type"],
     }

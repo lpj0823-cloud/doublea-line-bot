@@ -21,6 +21,7 @@ from linebot.v3.messaging import (
 )
 
 from calendar_service import create_calendar_event, find_and_delete_event, find_and_update_event, list_events_for_date, list_events_for_range, update_calendar_event
+from weather_service import get_current_weather, get_daily_forecast
 from event_parser import parse_message, parse_modification
 from state_service import (
     add_reminder,
@@ -187,6 +188,36 @@ def _format_calendar_query_result(label: str, events: list[dict], is_range: bool
         return "\n".join(lines)
 
 
+def _format_weather_today(current: dict, forecast: dict) -> str:
+    pop_str = f"🌂 降雨機率 {forecast['pop']}%" if forecast["pop"] > 0 else "☀️ 今天不太會下雨"
+    return (
+        f"🌦 台北今日天氣\n\n"
+        f"{current['emoji']} {current['description']}\n"
+        f"🌡 現在 {current['temp']}°C（體感 {current['feels_like']}°C）\n"
+        f"📊 今日 {forecast['temp_min']}～{forecast['temp_max']}°C\n"
+        f"{pop_str}\n"
+        f"💧 濕度 {current['humidity']}%"
+    )
+
+
+def _format_weather_single(forecast: dict) -> str:
+    pop_str = f"🌂 降雨機率 {forecast['pop']}%" if forecast["pop"] > 0 else "☀️ 不太會下雨"
+    return (
+        f"🌦 台北{forecast['label']}天氣\n\n"
+        f"{forecast['emoji']} {forecast['description']}\n"
+        f"🌡 {forecast['temp_min']}～{forecast['temp_max']}°C\n"
+        f"{pop_str}"
+    )
+
+
+def _format_weather_week(forecasts: list[dict]) -> str:
+    lines = ["🌦 台北近期天氣\n"]
+    for f in forecasts:
+        rain = f" ☔{f['pop']}%" if f["pop"] > 0 else ""
+        lines.append(f"【{f['label']}】{f['emoji']} {f['description']} {f['temp_min']}～{f['temp_max']}°C{rain}")
+    return "\n".join(lines)
+
+
 # ── Reminder helpers ──────────────────────────────────────────────────────────
 
 def schedule_event_reminder(chat_id: str, event_data: dict) -> None:
@@ -327,6 +358,7 @@ _TASK_KEYWORDS = [
 _MODIFY_KEYWORDS = ["修正", "更改", "改一下", "調整", "修改", "改成", "改到"]
 _QUERY_KEYWORDS = ["有什麼事", "有什麼行程", "有什麼活動", "行程", "有沒有事", "有沒有行程", "查一下行程"]
 _DELETE_KEYWORDS = ["刪除", "刪掉", "取消", "移除"]
+_WEATHER_KEYWORDS = ["天氣", "下雨", "氣溫", "溫度", "颱風", "會不會雨"]
 
 
 def _should_notify(text: str) -> bool:
@@ -337,7 +369,8 @@ def _should_notify(text: str) -> bool:
     time_hit = any(kw in text for kw in _TIME_KEYWORDS)
     task_hit = any(kw in text for kw in _TASK_KEYWORDS)
     query_hit = any(kw in text for kw in _QUERY_KEYWORDS)
-    return time_hit or task_hit or query_hit
+    weather_hit = any(kw in text for kw in _WEATHER_KEYWORDS)
+    return time_hit or task_hit or query_hit or weather_hit
 
 
 # ── Message processing ────────────────────────────────────────────────────────
@@ -371,7 +404,29 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
     msg_type = result.get("type", "ignore")
     print(f"[DoubleA] 分類：{msg_type}　{result}")
 
-    if msg_type == "edit":
+    if msg_type == "weather":
+        period = result.get("period", "today")
+        try:
+            if period == "today":
+                current = get_current_weather()
+                forecasts = get_daily_forecast(1)
+                reply = _format_weather_today(current, forecasts[0]) if forecasts else (
+                    f"{current['emoji']} 台北現在 {current['temp']}°C，{current['description']}"
+                )
+            elif period == "tomorrow":
+                forecasts = get_daily_forecast(3)
+                target = next((f for f in forecasts if f["label"] in ("明天", "後天")), None)
+                reply = _format_weather_single(target) if target else "⚠️ 無法取得近日天氣資料"
+            else:  # week
+                forecasts = get_daily_forecast(5)
+                reply = _format_weather_week(forecasts)
+            print(f"[DoubleA] 天氣查詢：{period}")
+        except Exception as e:
+            print(f"[DoubleA] 天氣查詢錯誤：{e}")
+            reply = "⚠️ 天氣查詢失敗，請稍後再試。"
+        _respond(reply)
+
+    elif msg_type == "edit":
         target_dt_str = result.get("target_datetime", "")
         has_time = result.get("has_time", True)
         title_hint = result.get("title_hint") or None
