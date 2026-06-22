@@ -171,6 +171,70 @@ def parse_new_datetime(text: str, current_time: datetime) -> str | None:
         return None
 
 
+def parse_image_for_event(image_bytes: bytes, mime_type: str, current_time: datetime) -> dict:
+    """用 Gemini Vision 分析圖片，提取行事曆事件。
+    回傳 {"type": "calendar", "events": [...]} 或 {"type": "no_event"}。
+    """
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    now_str = current_time.strftime("%Y-%m-%d %H:%M")
+
+    prompt = f"""現在時間：{now_str}（台北時間 UTC+8）
+
+分析這張圖片，提取其中的行事曆事件資訊。
+
+如果圖片包含「日期或時間 + 活動名稱」（例如：活動宣傳、行程表、邀請函、課表、截圖），
+輸出：{{"type": "calendar", "events": [...]}}
+
+若圖片沒有明確可建立的行事曆事件，輸出：{{"type": "no_event"}}
+
+events 格式：
+- title: 活動名稱（10字內）
+- start: ISO8601+08:00
+- end: ISO8601+08:00（若無結束時間：start + 1小時；醫療/出行類 + 2小時）
+- location: 地點或 null
+- 只有日期無時間 → start 用 09:00
+- 年份不明確 → 使用最近的未來日期
+- 每個獨立時間點 = 一筆獨立事件"""
+
+    response_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "type": {"type": "STRING"},
+            "events": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "title":    {"type": "STRING"},
+                        "start":    {"type": "STRING"},
+                        "end":      {"type": "STRING"},
+                        "location": {"type": "STRING"},
+                    },
+                    "required": ["title", "start", "end"],
+                },
+            },
+        },
+        "required": ["type"],
+    }
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[
+            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            types.Part.from_text(prompt),
+        ],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=response_schema,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
+    try:
+        return json.loads(response.text.strip())
+    except Exception:
+        return {"type": "no_event"}
+
+
 def parse_modification(instruction: str, original: dict, current_time: datetime) -> dict | None:
     """
     Given a modification instruction and original event, returns updated start/end.

@@ -6,6 +6,8 @@ import os
 import re
 import random
 import urllib.parse
+
+import requests
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -33,7 +35,7 @@ from calendar_service import (
     update_event_field_by_id,
 )
 from weather_service import get_current_weather, get_daily_forecast
-from event_parser import parse_message, parse_modification, parse_new_datetime
+from event_parser import parse_image_for_event, parse_message, parse_modification, parse_new_datetime
 from state_service import (
     add_reminder,
     clear_pending_edit,
@@ -1150,6 +1152,100 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
         print(f"[DoubleA] 略過（ignore）")
 
 
+# ── Image OCR ────────────────────────────────────────────────────────────────
+
+def _download_line_content(message_id: str) -> tuple[bytes, str]:
+    """LINE Content API から画像をダウンロード。Returns (bytes, mime_type)。"""
+    resp = requests.get(
+        f"https://api-data.line.me/v2/bot/message/{message_id}/content",
+        headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    mime_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+    return resp.content, mime_type
+
+
+def process_image(message_id: str, chat_id: str, reply_token: str | None = None) -> None:
+    """背景任務：下載圖片 → Gemini Vision 分析 → 若偵測到行事曆事件則建立並回覆。"""
+    save_chat_id(chat_id)
+    now = datetime.now(TAIPEI_TZ)
+
+    _used_reply: list[bool] = [False]
+
+    def _respond(msg: str) -> None:
+        if reply_token and not _used_reply[0]:
+            try:
+                _reply_line(reply_token, msg)
+                _used_reply[0] = True
+                return
+            except Exception as _e:
+                print(f"[DoubleA] image reply 失敗，改用 push：{_e}")
+        try:
+            _push_line(chat_id, msg)
+        except Exception as _e:
+            print(f"[DoubleA] image push 最終失敗：{_e}")
+
+    # 1. 下載圖片
+    try:
+        image_bytes, mime_type = _download_line_content(message_id)
+        print(f"[DoubleA] 圖片下載完成：{len(image_bytes)} bytes，{mime_type}")
+    except Exception as e:
+        print(f"[DoubleA] 圖片下載失敗：{e}")
+        return
+
+    # 2. Gemini Vision 分析
+    try:
+        result = parse_image_for_event(image_bytes, mime_type, now)
+        print(f"[DoubleA] 圖片分析結果：{result.get('type')}，{len(result.get('events', []))} 筆事件")
+    except Exception as e:
+        print(f"[DoubleA] 圖片 OCR 失敗：{e}")
+        return
+
+    if result.get("type") != "calendar":
+        return  # 無事件 → 完全靜默，不打擾群組
+
+    events = result.get("events") or []
+    if not events:
+        return
+
+    # 3. 建立行事曆事件（邏輯與 process_message 的 calendar 分支相同）
+    if len(events) == 1:
+        ev = events[0]
+        _fix_event_times(ev)
+        try:
+            created = create_calendar_event(ev)
+            save_last_event(created["id"], ev)
+            schedule_event_reminder(chat_id, ev)
+            reply = _format_calendar_confirmation(ev, created["link"])
+            reply += f"\n\n📸 已從圖片自動偵測並建立！"
+            print(f"[DoubleA] 圖片行事曆建立：{ev.get('title')} {created['link']}")
+        except Exception as e:
+            print(f"[DoubleA] 圖片行事曆建立失敗：{e}")
+            _respond("⚠️ 偵測到行程但建立失敗，請稍後再試。")
+            return
+        _respond(reply)
+    else:
+        succeeded, failed = [], []
+        for ev in events:
+            _fix_event_times(ev)
+            try:
+                created = create_calendar_event(ev)
+                save_last_event(created["id"], ev)
+                schedule_event_reminder(chat_id, ev)
+                succeeded.append({"event_data": ev, "link": created["link"]})
+                print(f"[DoubleA] 圖片行事曆建立：{ev.get('title')} {created['link']}")
+            except Exception as e:
+                print(f"[DoubleA] 圖片行事曆建立失敗（{ev.get('title')}）：{e}")
+                failed.append(ev.get("title", "未知"))
+        if succeeded:
+            reply = _format_multi_calendar_confirmation(succeeded)
+            reply += "\n\n📸 已從圖片自動偵測並建立！"
+            if failed:
+                reply += f"\n\n⚠️ 以下建立失敗：{'、'.join(failed)}"
+            _respond(reply)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.post("/webhook")
@@ -1171,12 +1267,21 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="Invalid body")
 
     for event in payload.get("events", []):
-        if event.get("type") == "message" and event.get("message", {}).get("type") == "text":
-            text = event["message"]["text"].strip()
-            source = event.get("source", {})
-            chat_id = source.get("groupId") or source.get("roomId") or source.get("userId", "")
-            reply_token = event.get("replyToken")
-            background_tasks.add_task(process_message, text, chat_id, reply_token)
+        if event.get("type") != "message":
+            continue
+        msg = event.get("message", {})
+        source = event.get("source", {})
+        chat_id = source.get("groupId") or source.get("roomId") or source.get("userId", "")
+        reply_token = event.get("replyToken")
+
+        if msg.get("type") == "text":
+            text = msg.get("text", "").strip()
+            if text:
+                background_tasks.add_task(process_message, text, chat_id, reply_token)
+        elif msg.get("type") == "image":
+            message_id = msg.get("id", "")
+            if message_id:
+                background_tasks.add_task(process_image, message_id, chat_id, reply_token)
 
     return JSONResponse(content={"status": "ok"})
 
