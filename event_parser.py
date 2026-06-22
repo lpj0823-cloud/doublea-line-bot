@@ -221,7 +221,7 @@ events 格式：
         model="gemini-2.5-flash",
         contents=[
             types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-            types.Part.from_text(prompt),
+            types.Part.from_text(text=prompt),
         ],
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
