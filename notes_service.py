@@ -4,20 +4,51 @@ from datetime import datetime
 
 import pytz
 
+USE_FIRESTORE = bool(os.environ.get("K_SERVICE") or os.environ.get("USE_FIRESTORE"))
 NOTES_FILE = os.path.join(os.path.dirname(__file__), "notes.json")
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
+FIRESTORE_COLLECTION = "doublea"
+FIRESTORE_DOC = "notespad"
 
 
-def _load() -> dict:
+def _get_db():
+    from google.cloud import firestore
+    return firestore.Client()
+
+
+# ── Firestore backend ─────────────────────────────────────────────────────────
+
+def _fs_load() -> dict:
+    doc = _get_db().collection(FIRESTORE_COLLECTION).document(FIRESTORE_DOC).get()
+    return doc.to_dict() or {"notes": [], "next_id": 1}
+
+
+def _fs_save(data: dict) -> None:
+    _get_db().collection(FIRESTORE_COLLECTION).document(FIRESTORE_DOC).set(data)
+
+
+# ── Local JSON backend ────────────────────────────────────────────────────────
+
+def _local_load() -> dict:
     if os.path.exists(NOTES_FILE):
         with open(NOTES_FILE, encoding="utf-8") as f:
             return json.load(f)
     return {"notes": [], "next_id": 1}
 
 
-def _save(data: dict) -> None:
+def _local_save(data: dict) -> None:
     with open(NOTES_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def _load() -> dict:
+    return _fs_load() if USE_FIRESTORE else _local_load()
+
+
+def _save(data: dict) -> None:
+    _fs_save(data) if USE_FIRESTORE else _local_save(data)
 
 
 def add_note(content: str) -> dict:

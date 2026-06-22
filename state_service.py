@@ -1,14 +1,13 @@
 """
 State persistence:
 - 本機開發：使用 chat_state.json
-- Cloud Run：使用 Google Firestore
+- Cloud Run / Railway（設定 USE_FIRESTORE=true）：使用 Google Firestore
 """
 import json
 import os
 from datetime import datetime
 
-# Cloud Run 會設定 K_SERVICE 環境變數
-USE_FIRESTORE = os.environ.get("K_SERVICE") is not None
+USE_FIRESTORE = bool(os.environ.get("K_SERVICE") or os.environ.get("USE_FIRESTORE"))
 
 CHAT_STATE_FILE = os.path.join(os.path.dirname(__file__), "chat_state.json")
 FIRESTORE_COLLECTION = "doublea"
