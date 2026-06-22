@@ -20,7 +20,7 @@ from linebot.v3.messaging import (
     TextMessage,
 )
 
-from calendar_service import create_calendar_event, find_and_delete_event, list_events_for_date, list_events_for_range, update_calendar_event
+from calendar_service import create_calendar_event, find_and_delete_event, find_and_update_event, list_events_for_date, list_events_for_range, update_calendar_event
 from event_parser import parse_message, parse_modification
 from state_service import (
     add_reminder,
@@ -371,7 +371,45 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
     msg_type = result.get("type", "ignore")
     print(f"[DoubleA] 分類：{msg_type}　{result}")
 
-    if msg_type == "delete":
+    if msg_type == "edit":
+        target_dt_str = result.get("target_datetime", "")
+        has_time = result.get("has_time", True)
+        title_hint = result.get("title_hint") or None
+        updates: dict = {}
+        if result.get("new_start"):
+            updates["new_start"] = result["new_start"]
+        loc = result.get("new_location")
+        if loc and loc != "null":
+            updates["new_location"] = loc
+
+        if not updates:
+            _respond("⚠️ 無法解析要修改的內容，請重新描述")
+        else:
+            try:
+                target_dt = datetime.fromisoformat(target_dt_str)
+                updated = find_and_update_event(target_dt, has_time, title_hint, updates)
+                if updated:
+                    lines = [f"✅ 已修改：【{updated['title']}】"]
+                    if updated.get("new_start"):
+                        new_dt = datetime.fromisoformat(updated["new_start"])
+                        if new_dt.tzinfo is None:
+                            new_dt = TAIPEI_TZ.localize(new_dt)
+                        else:
+                            new_dt = new_dt.astimezone(TAIPEI_TZ)
+                        lines.append(f"🗓 新時間：{new_dt.strftime('%-m月%-d日 %H:%M')}")
+                    if updated.get("new_location"):
+                        lines.append(f"📍 新地點：{updated['new_location']}")
+                    lines.append(f"🔗 {updated['link']}")
+                    reply = "\n".join(lines)
+                    print(f"[DoubleA] 行事曆 edit：{updated['title']}")
+                else:
+                    reply = "❓ 找不到這個活動，請確認時間是否正確"
+            except Exception as e:
+                print(f"[DoubleA] Edit 錯誤：{e}")
+                reply = "⚠️ 行事曆修改失敗，請稍後再試。"
+            _respond(reply)
+
+    elif msg_type == "delete":
         target_dt_str = result.get("target_datetime", "")
         has_time = result.get("has_time", True)
         title_hint = result.get("title_hint") or None

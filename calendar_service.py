@@ -171,6 +171,115 @@ def find_and_delete_event(
     return title
 
 
+def find_and_update_event(
+    target_dt: datetime,
+    has_time: bool = True,
+    title_hint: str | None = None,
+    updates: dict | None = None,
+) -> dict | None:
+    """找到最符合條件的行事曆事件並更新時間或地點。
+    updates 可包含 new_start（ISO8601）、new_location（str）。
+    改時間時自動保留原本的活動時長。
+    回傳 {"title", "new_start", "new_location", "link"} 或 None。
+    """
+    if not updates:
+        return None
+
+    service = build("calendar", "v3", credentials=get_credentials())
+
+    if target_dt.tzinfo is None:
+        target_dt = TAIPEI_TZ.localize(target_dt)
+    else:
+        target_dt = target_dt.astimezone(TAIPEI_TZ)
+
+    day_start = TAIPEI_TZ.localize(datetime(target_dt.year, target_dt.month, target_dt.day, 0, 0, 0))
+    day_end = day_start + timedelta(days=1)
+
+    result = (
+        service.events()
+        .list(
+            calendarId=CALENDAR_ID,
+            timeMin=day_start.isoformat(),
+            timeMax=day_end.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+
+    items = result.get("items", [])
+    if not items:
+        return None
+
+    hint = (title_hint or "").strip()
+
+    def time_diff_min(item) -> float:
+        start = item["start"].get("dateTime") or item["start"].get("date", "")
+        try:
+            ev_dt = datetime.fromisoformat(start)
+            if ev_dt.tzinfo is None:
+                ev_dt = TAIPEI_TZ.localize(ev_dt)
+            else:
+                ev_dt = ev_dt.astimezone(TAIPEI_TZ)
+            return abs((ev_dt - target_dt).total_seconds() / 60)
+        except (ValueError, KeyError):
+            return 9999.0
+
+    def title_matches(item) -> bool:
+        return bool(hint and hint in item.get("summary", ""))
+
+    if has_time:
+        candidates = [it for it in items if time_diff_min(it) <= 90]
+        if not candidates and hint:
+            candidates = [it for it in items if title_matches(it)]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda it: (not title_matches(it), time_diff_min(it)))
+    else:
+        candidates = [it for it in items if title_matches(it)] if hint else items
+        if not candidates:
+            return None
+        candidates.sort(key=time_diff_min)
+
+    best = candidates[0]
+    event_id = best["id"]
+    title = best.get("summary", "（無標題）")
+
+    event = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+
+    new_start = updates.get("new_start")
+    new_location = updates.get("new_location")
+
+    if new_start:
+        # 計算原始時長，套用到新開始時間
+        try:
+            orig_start = datetime.fromisoformat(event["start"]["dateTime"])
+            orig_end = datetime.fromisoformat(event["end"]["dateTime"])
+            duration = orig_end - orig_start
+            new_start_dt = datetime.fromisoformat(new_start)
+            new_end_dt = new_start_dt + duration
+            event["start"] = {"dateTime": new_start, "timeZone": "Asia/Taipei"}
+            event["end"] = {"dateTime": new_end_dt.isoformat(), "timeZone": "Asia/Taipei"}
+        except (KeyError, ValueError):
+            event["start"] = {"dateTime": new_start, "timeZone": "Asia/Taipei"}
+
+    if new_location is not None:
+        event["location"] = new_location
+
+    updated = (
+        service.events()
+        .update(calendarId=CALENDAR_ID, eventId=event_id, body=event, sendUpdates="all")
+        .execute()
+    )
+
+    return {
+        "title": title,
+        "new_start": new_start,
+        "new_location": new_location,
+        "link": updated.get("htmlLink", ""),
+    }
+
+
 def create_calendar_event(event_data: dict) -> dict:
     """Create a Google Calendar event and invite Ginny. Returns {"id": ..., "link": ...}"""
     service = build("calendar", "v3", credentials=get_credentials())

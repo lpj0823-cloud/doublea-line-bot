@@ -29,6 +29,16 @@ def parse_message(message: str, current_time: datetime) -> dict:
 
 ━━ 判斷規則 ━━
 
+【edit】修改特定行事曆活動（使用者指定了「目標事件」的時間或標題，並說明要改什麼）
+例：「把明天下午3點的會議改到4點」「把今天的禱告會改到教會」「把後天9點的課改到10點半」
+→ 輸出：{{"type": "edit", "target_datetime": "ISO8601+08:00", "has_time": true, "title_hint": "會議",
+         "new_start": "ISO8601+08:00", "new_location": null}}
+  - target_datetime: 目標事件「目前」的時間（目前的時間）
+  - has_time: 是否明確指定目標時間（true/false）
+  - title_hint: 目標事件的名稱關鍵字；通用詞（「活動」「行程」「事」）填 null
+  - new_start: 若改時間則填新的開始時間（ISO8601+08:00），不改則填 null；系統會自動保留原有時長
+  - new_location: 若改地點則填新地點，不改則填 null
+
 【delete】刪除/取消行事曆活動意圖（如「刪除明天下午3點的會議」「取消今天5點的活動」「刪掉後天的牙醫」）
 → 輸出：{{"type": "delete", "target_datetime": "ISO8601+08:00", "has_time": true, "title_hint": "會議"}}
   - has_time: 使用者是否明確提到時間（true/false）
@@ -41,7 +51,7 @@ def parse_message(message: str, current_time: datetime) -> dict:
   - 週查詢（這週/本週/下週）：start_date = 該週週一，end_date = 該週週日
   - label 用自然中文，如「今天」「明天」「6月25日」「這週」「下週」
 
-【modify】含有「修正/更改/改一下/調整/修改」且指向剛才建立的行事曆
+【modify】含有「修正/更改/改一下/調整/修改」且「沒有指定目標事件時間或標題」，暗指剛才建立的那個行事曆
 → 輸出：{{"type": "modify"}}
 
 【calendar】含有「明確時間/日期 + 未來的事（新增/建立意圖）」
@@ -103,6 +113,8 @@ events 陣列格式：每筆事件 = {{"title": "中文標題10字內", "start":
             "target_datetime":  {"type": "STRING"},
             "has_time":         {"type": "BOOLEAN"},
             "title_hint":       {"type": "STRING"},
+            "new_start":        {"type": "STRING"},
+            "new_location":     {"type": "STRING"},
         },
         "required": ["type"],
     }
