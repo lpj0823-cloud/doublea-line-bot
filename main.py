@@ -112,7 +112,8 @@ def _generate_share_link(ev: dict) -> str:
 def _format_calendar_confirmation(event_data: dict, event_link: str) -> str:
     start_dt = datetime.fromisoformat(event_data["start"])
     date_str = start_dt.strftime("%-m月%-d日 %H:%M")
-    location_line = f"\n📍 {event_data['location']}" if event_data.get("location") else ""
+    loc = event_data.get("location")
+    location_line = f"\n📍 {loc}" if (loc and loc != "null") else ""
     link_line = f"\n\n🔗 {event_link}" if event_link else ""
     share_link = _generate_share_link(event_data)
     return (
@@ -134,7 +135,8 @@ def _format_multi_calendar_confirmation(results: list[dict]) -> str:
         ev = r["event_data"]
         start_dt = datetime.fromisoformat(ev["start"])
         date_str = start_dt.strftime("%-m月%-d日 %H:%M")
-        location_line = f"\n   📍 {ev['location']}" if ev.get("location") else ""
+        loc = ev.get("location")
+        location_line = f"\n   📍 {loc}" if (loc and loc != "null") else ""
         share_link = _generate_share_link(ev)
         lines.append(
             f"{i}.【{ev['title']}】\n"
