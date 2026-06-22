@@ -149,6 +149,33 @@ def delete_event_by_id(event_id: str) -> str:
     return title
 
 
+def update_event_field_by_id(event_id: str, field: str, value: str) -> None:
+    """更新指定事件的單一欄位（title / start / location）。保留原有時長。"""
+    service = build("calendar", "v3", credentials=get_credentials())
+    event = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+
+    if field == "title":
+        event["summary"] = value
+    elif field == "start":
+        try:
+            orig_start = datetime.fromisoformat(event["start"]["dateTime"])
+            orig_end = datetime.fromisoformat(event["end"]["dateTime"])
+            duration = orig_end - orig_start
+            new_start_dt = datetime.fromisoformat(value)
+            if new_start_dt.tzinfo is None:
+                new_start_dt = TAIPEI_TZ.localize(new_start_dt)
+            event["start"] = {"dateTime": new_start_dt.isoformat(), "timeZone": "Asia/Taipei"}
+            event["end"] = {"dateTime": (new_start_dt + duration).isoformat(), "timeZone": "Asia/Taipei"}
+        except (KeyError, ValueError):
+            event["start"] = {"dateTime": value, "timeZone": "Asia/Taipei"}
+    elif field == "location":
+        event["location"] = value
+
+    service.events().update(
+        calendarId=CALENDAR_ID, eventId=event_id, body=event, sendUpdates="all"
+    ).execute()
+
+
 def find_and_delete_event(
     target_dt: datetime,
     has_time: bool = True,

@@ -26,17 +26,24 @@ from linebot.v3.messaging import (
     TextMessage,
 )
 
-from calendar_service import create_calendar_event, delete_event_by_id, find_and_delete_event, find_and_update_event, list_events_for_date, list_events_for_range, list_upcoming_events, update_calendar_event
+from calendar_service import (
+    create_calendar_event, delete_event_by_id, find_and_delete_event, find_and_update_event,
+    list_events_for_date, list_events_for_range, list_upcoming_events, update_calendar_event,
+    update_event_field_by_id,
+)
 from weather_service import get_current_weather, get_daily_forecast
-from event_parser import parse_message, parse_modification
+from event_parser import parse_message, parse_modification, parse_new_datetime
 from state_service import (
     add_reminder,
+    clear_pending_edit,
     get_due_reminders,
     load_chat_id,
     load_last_event,
+    load_pending_edit,
     mark_reminder_sent,
     save_chat_id,
     save_last_event,
+    save_pending_edit,
 )
 from todo_service import (
     TASKS_URL,
@@ -119,6 +126,58 @@ def _push_delete_picker(chat_id: str, events: list[dict]) -> None:
 
     msg = TextMessage(
         text="\n".join(lines),
+        quick_reply=QuickReply(items=qr_items),
+    )
+    with ApiClient(line_config) as api_client:
+        MessagingApi(api_client).push_message(
+            PushMessageRequest(to=chat_id, messages=[msg])
+        )
+
+
+def _push_edit_picker(chat_id: str, events: list[dict]) -> None:
+    """發送含 Quick Reply 按鈕的行程選擇訊息（修改用）。"""
+    lines = ["以下是未來 7 天的行程，請點選要修改的：\n"]
+    qr_items = []
+    for ev in events:
+        time_part = f"{ev['start_str']} " if ev.get("start_str") else ""
+        lines.append(f"📅 {ev['date_str']} {time_part}【{ev['title']}】")
+        if len(qr_items) < 13:
+            label = f"{ev['date_str']} {time_part}{ev['title']}"[:20]
+            # embed title in action text to avoid an extra API call later
+            qr_items.append(
+                QuickReplyItem(action=MessageAction(
+                    label=label,
+                    text=f"選擇修改 {ev['id']} {ev['title']}",
+                ))
+            )
+    msg = TextMessage(
+        text="\n".join(lines),
+        quick_reply=QuickReply(items=qr_items),
+    )
+    with ApiClient(line_config) as api_client:
+        MessagingApi(api_client).push_message(
+            PushMessageRequest(to=chat_id, messages=[msg])
+        )
+
+
+def _push_field_picker(chat_id: str, event_id: str, event_title: str) -> None:
+    """讓使用者選要修改哪個欄位（標題／時間／地點）。"""
+    qr_items = [
+        QuickReplyItem(action=MessageAction(
+            label="✏️ 標題",
+            text=f"修改欄位 title {event_id} {event_title}",
+        )),
+        QuickReplyItem(action=MessageAction(
+            label="🕐 時間",
+            text=f"修改欄位 start {event_id} {event_title}",
+        )),
+        QuickReplyItem(action=MessageAction(
+            label="📍 地點",
+            text=f"修改欄位 location {event_id} {event_title}",
+        )),
+    ]
+    msg = TextMessage(
+        text=f"要修改【{event_title}】的哪個欄位？",
         quick_reply=QuickReply(items=qr_items),
     )
     with ApiClient(line_config) as api_client:
@@ -440,6 +499,43 @@ def handle_command(text: str, chat_id: str) -> bool:
             _push_line(chat_id, f"⚠️ 刪除失敗：{e}")
         return True
 
+    if text.strip() == "修改行程":
+        try:
+            events = list_upcoming_events(days=7)
+            if not events:
+                _push_line(chat_id, "📅 未來 7 天沒有行程可以修改。")
+            else:
+                _push_edit_picker(chat_id, events)
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 無法取得行程：{e}")
+        return True
+
+    if text.startswith("選擇修改 "):
+        # format: "選擇修改 {event_id} {title}"
+        rest = text[len("選擇修改 "):]
+        parts = rest.split(" ", 1)
+        event_id = parts[0]
+        event_title = parts[1] if len(parts) > 1 else "（無標題）"
+        try:
+            _push_field_picker(chat_id, event_id, event_title)
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 錯誤：{e}")
+        return True
+
+    if text.startswith("修改欄位 "):
+        # format: "修改欄位 {field} {event_id} {title}"
+        rest = text[len("修改欄位 "):]
+        parts = rest.split(" ", 2)
+        if len(parts) >= 2:
+            field = parts[0]
+            event_id = parts[1]
+            event_title = parts[2] if len(parts) > 2 else "（無標題）"
+            field_name = {"title": "標題", "start": "時間", "location": "地點"}.get(field, field)
+            hint = {"title": "（例如：家庭聚會）", "start": "（例如：明天下午3點）", "location": "（例如：教會）"}.get(field, "")
+            save_pending_edit(chat_id, {"event_id": event_id, "field": field, "title": event_title})
+            _push_line(chat_id, f"請輸入【{event_title}】的新{field_name}：\n{hint}\n\n輸入「取消」可放棄修改")
+        return True
+
     return False
 
 
@@ -536,6 +632,7 @@ def _should_notify(text: str) -> bool:
 def process_message(text: str, chat_id: str, reply_token: str | None = None) -> None:
     print(f"[DoubleA] 收到訊息：{text}")
     save_chat_id(chat_id)
+    now = datetime.now(TAIPEI_TZ)
 
     # 優先用 reply_token（免費），失敗或無 token 時 fallback 到 push
     _used_reply: list[bool] = [False]
@@ -556,11 +653,44 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
     if handle_command(text, chat_id):
         return
 
+    # 處理待輸入的欄位值（「修改行程」流程最後一步）
+    pending = load_pending_edit(chat_id)
+    if pending:
+        clear_pending_edit(chat_id)
+        if text.strip() in ("取消", "取消修改", "cancel"):
+            _respond("已取消修改。")
+            return
+        field = pending["field"]
+        event_id = pending["event_id"]
+        event_title = pending["title"]
+        try:
+            if field == "start":
+                new_dt_str = parse_new_datetime(text, now)
+                if not new_dt_str:
+                    _respond("⚠️ 無法解析時間，請重新輸入（例如：明天下午3點）")
+                    return
+                update_event_field_by_id(event_id, "start", new_dt_str)
+                new_dt = datetime.fromisoformat(new_dt_str)
+                if new_dt.tzinfo is None:
+                    new_dt = TAIPEI_TZ.localize(new_dt)
+                else:
+                    new_dt = new_dt.astimezone(TAIPEI_TZ)
+                _respond(f"✅ 已修改：【{event_title}】\n🗓 新時間：{new_dt.strftime('%-m月%-d日 %H:%M')}")
+            elif field == "title":
+                update_event_field_by_id(event_id, "title", text.strip())
+                _respond(f"✅ 已修改標題：\n【{text.strip()}】")
+            elif field == "location":
+                update_event_field_by_id(event_id, "location", text.strip())
+                _respond(f"✅ 已修改地點：【{event_title}】\n📍 {text.strip()}")
+        except Exception as e:
+            print(f"[DoubleA] 行程欄位更新失敗：{e}")
+            _respond("⚠️ 修改失敗，請稍後再試。")
+        return
+
     # 本地快速判斷：命中才推送等待提示，避免日常聊天被打擾
     if _should_notify(text):
         _push_line(chat_id, "⏳ 收到！處理中，請稍候...")
 
-    now = datetime.now(TAIPEI_TZ)
     result = parse_message(text, now)
     msg_type = result.get("type", "ignore")
     print(f"[DoubleA] 分類：{msg_type}　{result}")

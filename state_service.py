@@ -136,3 +136,18 @@ def mark_reminder_sent(doc_id) -> None:
         for r in _local_reminders:
             if r.get("_id") == doc_id:
                 r["sent"] = True
+
+
+# ── Pending edit state ────────────────────────────────────────────────────────
+
+def save_pending_edit(chat_id: str, data: dict) -> None:
+    save_state({f"pending_edit_{chat_id}": data})
+
+
+def load_pending_edit(chat_id: str) -> dict | None:
+    val = load_state().get(f"pending_edit_{chat_id}")
+    return val if isinstance(val, dict) else None
+
+
+def clear_pending_edit(chat_id: str) -> None:
+    save_state({f"pending_edit_{chat_id}": None})

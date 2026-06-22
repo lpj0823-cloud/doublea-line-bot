@@ -140,6 +140,37 @@ events 陣列格式：每筆事件 = {{"title": "中文標題10字內", "start":
         return {"type": "ignore"}
 
 
+def parse_new_datetime(text: str, current_time: datetime) -> str | None:
+    """Convert natural language time to ISO8601+08:00 string. Returns None if unparseable."""
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    now_str = current_time.strftime("%Y-%m-%d %H:%M")
+    prompt = f"""現在時間：{now_str}（台北時間 UTC+8）
+
+將以下自然語言時間轉換為 ISO 8601 格式（+08:00 時區），只輸出 JSON：
+{{"datetime": "YYYY-MM-DDTHH:MM:SS+08:00"}}
+
+如果無法解析，輸出：{{"datetime": null}}
+
+輸入：「{text}」"""
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema={
+                "type": "OBJECT",
+                "properties": {"datetime": {"type": "STRING"}},
+            },
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
+    try:
+        return json.loads(response.text.strip()).get("datetime")
+    except Exception:
+        return None
+
+
 def parse_modification(instruction: str, original: dict, current_time: datetime) -> dict | None:
     """
     Given a modification instruction and original event, returns updated start/end.
