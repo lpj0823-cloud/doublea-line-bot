@@ -61,6 +61,13 @@ from shopping_service import (
     mark_done_by_keyword,
 )
 from notes_service import add_note, delete_note_by_index, get_notes
+from birthday_service import (
+    add_birthday,
+    delete_birthday_by_index,
+    get_birthdays,
+    get_todays_birthdays,
+    parse_birthday_date,
+)
 
 load_dotenv()
 
@@ -76,9 +83,10 @@ scheduler = AsyncIOScheduler(timezone=TAIPEI_TZ)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     scheduler.add_job(morning_briefing_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
+    scheduler.add_job(birthday_reminder_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
     scheduler.add_job(daily_reminder_job, CronTrigger(hour=17, minute=0, timezone=TAIPEI_TZ))
     scheduler.start()
-    print("[DoubleA] 排程器已啟動：07:00 早安行程、17:00 待辦提醒")
+    print("[DoubleA] 排程器已啟動：07:00 早安行程＋生日提醒、17:00 待辦提醒")
     yield
     scheduler.shutdown()
     print("[DoubleA] 排程器已停止")
@@ -258,6 +266,60 @@ def _push_notes(chat_id: str, notes: list[dict]) -> None:
         MessagingApi(api_client).push_message(
             PushMessageRequest(to=chat_id, messages=[msg])
         )
+
+
+def _push_birthday_list(chat_id: str, birthdays: list[dict]) -> None:
+    """顯示生日清單，附 Quick Reply 刪除按鈕。"""
+    if not birthdays:
+        _push_line(chat_id, "🎂 生日清單是空的！\n\n用「+生日 名字 月/日」新增")
+        return
+
+    lines = [f"🎂 生日清單（{len(birthdays)} 筆）\n"]
+    for i, b in enumerate(birthdays, 1):
+        year_part = f"（{b['year']}年）" if b.get("year") else ""
+        lines.append(f"{i}. {b['name']}｜{b['month']}月{b['day']}日{year_part}")
+
+    qr_items = []
+    for i, b in enumerate(birthdays, 1):
+        if len(qr_items) >= 13:
+            break
+        label = f"🗑 {i}. {b['name']}"[:20]
+        qr_items.append(QuickReplyItem(action=MessageAction(label=label, text=f"刪生日 {i}")))
+
+    if qr_items:
+        msg = TextMessage(text="\n".join(lines), quick_reply=QuickReply(items=qr_items))
+    else:
+        msg = TextMessage(text="\n".join(lines))
+    with ApiClient(line_config) as api_client:
+        MessagingApi(api_client).push_message(
+            PushMessageRequest(to=chat_id, messages=[msg])
+        )
+
+
+def birthday_reminder_job() -> None:
+    """每日 07:00 排程：檢查今日是否有人生日，有則發送提醒。"""
+    chat_id = load_chat_id()
+    if not chat_id:
+        return
+    now = datetime.now(TAIPEI_TZ)
+    birthdays = get_todays_birthdays(now.month, now.day)
+    if not birthdays:
+        return
+
+    sections = []
+    for b in birthdays:
+        lines = [f"🎂 今天是【{b['name']}】的生日！"]
+        if b.get("year"):
+            age = now.year - b["year"]
+            lines.append(f"（{b['year']} 年生，今年滿 {age} 歲）")
+        sections.append("\n".join(lines))
+
+    msg = "\n\n".join(sections) + "\n\n🎉 祝生日快樂、平安喜樂！"
+    try:
+        _push_line(chat_id, msg)
+        print(f"[DoubleA] 生日提醒發送：{', '.join(b['name'] for b in birthdays)}")
+    except Exception as e:
+        print(f"[DoubleA] 生日提醒發送失敗：{e}")
 
 
 def morning_briefing_job() -> None:
@@ -698,6 +760,49 @@ def handle_command(text: str, chat_id: str) -> bool:
                 _push_line(chat_id, f"⚠️ 刪除失敗：{e}")
         else:
             _push_line(chat_id, "❓ 請輸入筆記編號，例如：刪筆記 1")
+        return True
+
+    # ── 生日提醒 ──────────────────────────────────────────────────────────────
+
+    if text.startswith("+生日"):
+        rest = text[len("+生日"):].strip()
+        parts = rest.split(None, 1)
+        if len(parts) < 2:
+            _push_line(chat_id, "格式：+生日 名字 日期\n範例：+生日 媽媽 3/15\n　　　+生日 Ginny 1990/6/10")
+            return True
+        name, date_str = parts[0], parts[1]
+        month, day, year = parse_birthday_date(date_str)
+        if not month:
+            _push_line(chat_id, f"⚠️ 無法解析日期「{date_str}」\n格式範例：3/15 或 1990/3/15")
+            return True
+        try:
+            entry = add_birthday(name, month, day, year)
+            year_part = f"（{year} 年）" if year else ""
+            _push_line(chat_id, f"🎂 已記錄：{entry['name']}｜{month}月{day}日{year_part}")
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 新增失敗：{e}")
+        return True
+
+    if text.strip() == "生日清單":
+        try:
+            _push_birthday_list(chat_id, get_birthdays())
+        except Exception as e:
+            _push_line(chat_id, f"⚠️ 無法取得生日清單：{e}")
+        return True
+
+    if text.startswith("刪生日 "):
+        rest = text[len("刪生日 "):].strip()
+        if rest.isdigit():
+            try:
+                name = delete_birthday_by_index(int(rest))
+                if name:
+                    _push_line(chat_id, f"✅ 已刪除：{name} 的生日記錄")
+                else:
+                    _push_line(chat_id, f"❓ 找不到第 {rest} 筆")
+            except Exception as e:
+                _push_line(chat_id, f"⚠️ 刪除失敗：{e}")
+        else:
+            _push_line(chat_id, "❓ 請輸入編號，例如：刪生日 1")
         return True
 
     return False
