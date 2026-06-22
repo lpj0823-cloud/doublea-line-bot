@@ -35,6 +35,7 @@ def list_events_for_date(date: datetime) -> list[dict]:
     for item in result.get("items", []):
         title = item.get("summary", "（無標題）")
         start = item["start"].get("dateTime") or item["start"].get("date", "")
+        location = item.get("location") or ""
         if start:
             try:
                 dt = datetime.fromisoformat(start)
@@ -43,7 +44,53 @@ def list_events_for_date(date: datetime) -> list[dict]:
                 start_str = start
         else:
             start_str = ""
-        events.append({"title": title, "start_str": start_str})
+        events.append({"title": title, "start_str": start_str, "location": location})
+
+    return events
+
+
+def list_events_for_range(start_date: datetime, end_date: datetime) -> list[dict]:
+    """列出日期範圍內的所有行事曆事件（台北時間）。
+    回傳 [{"title", "start_str", "date_str", "location"}, ...]，依時間排序。
+    """
+    service = build("calendar", "v3", credentials=get_credentials())
+
+    range_start = TAIPEI_TZ.localize(datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0))
+    range_end = TAIPEI_TZ.localize(datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59))
+
+    result = (
+        service.events()
+        .list(
+            calendarId=CALENDAR_ID,
+            timeMin=range_start.isoformat(),
+            timeMax=range_end.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+
+    events = []
+    for item in result.get("items", []):
+        title = item.get("summary", "（無標題）")
+        start = item["start"].get("dateTime") or item["start"].get("date", "")
+        location = item.get("location") or ""
+        if start:
+            try:
+                dt = datetime.fromisoformat(start)
+                if dt.tzinfo is None:
+                    dt = TAIPEI_TZ.localize(dt)
+                else:
+                    dt = dt.astimezone(TAIPEI_TZ)
+                date_str = dt.strftime("%-m/%-d")
+                start_str = dt.strftime("%H:%M")
+            except ValueError:
+                date_str = start[:10]
+                start_str = ""
+        else:
+            date_str = ""
+            start_str = ""
+        events.append({"title": title, "start_str": start_str, "date_str": date_str, "location": location})
 
     return events
 

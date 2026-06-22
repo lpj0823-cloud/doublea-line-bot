@@ -20,7 +20,7 @@ from linebot.v3.messaging import (
     TextMessage,
 )
 
-from calendar_service import create_calendar_event, list_events_for_date, update_calendar_event
+from calendar_service import create_calendar_event, list_events_for_date, list_events_for_range, update_calendar_event
 from event_parser import parse_message, parse_modification
 from state_service import (
     add_reminder,
@@ -156,6 +156,35 @@ def _format_todo_list(tasks: list) -> str:
         lines.append(f"{i}. {t['title']}")
     lines.append(f"\n🔗 {TASKS_URL}")
     return "\n".join(lines)
+
+
+def _format_calendar_query_result(label: str, events: list[dict], is_range: bool = False) -> str:
+    if not events:
+        return f"📅 {label}沒有行程喔！"
+
+    def _ev_line(ev: dict, prefix: str = "・") -> str:
+        time_part = f"{ev['start_str']} " if ev.get("start_str") else ""
+        loc = ev.get("location", "")
+        loc_part = f"（{loc}）" if (loc and loc != "null") else ""
+        return f"{prefix}{time_part}{ev['title']}{loc_part}"
+
+    if is_range:
+        from collections import OrderedDict
+        by_date: dict = OrderedDict()
+        for ev in events:
+            key = ev.get("date_str", "")
+            by_date.setdefault(key, []).append(ev)
+        lines = [f"📅 {label}的行程：\n"]
+        for date_str, day_events in by_date.items():
+            lines.append(f"【{date_str}】")
+            for ev in day_events:
+                lines.append(_ev_line(ev))
+        return "\n".join(lines)
+    else:
+        lines = [f"📅 {label}的行程：\n"]
+        for ev in events:
+            lines.append(_ev_line(ev))
+        return "\n".join(lines)
 
 
 # ── Reminder helpers ──────────────────────────────────────────────────────────
@@ -296,16 +325,18 @@ _TASK_KEYWORDS = [
     "領", "取", "辦", "處理", "申請",
 ]
 _MODIFY_KEYWORDS = ["修正", "更改", "改一下", "調整", "修改", "改成", "改到"]
+_QUERY_KEYWORDS = ["有什麼事", "有什麼行程", "有什麼活動", "行程", "有沒有事", "有沒有行程", "查一下行程"]
 
 
 def _should_notify(text: str) -> bool:
-    """本地快速判斷：是否有可能是行事曆/待辦/修改，值得先推送等待訊息。"""
+    """本地快速判斷：是否有可能是行事曆/待辦/修改/查詢，值得先推送等待訊息。"""
     for kw in _MODIFY_KEYWORDS:
         if kw in text:
             return True
     time_hit = any(kw in text for kw in _TIME_KEYWORDS)
     task_hit = any(kw in text for kw in _TASK_KEYWORDS)
-    return time_hit or task_hit
+    query_hit = any(kw in text for kw in _QUERY_KEYWORDS)
+    return time_hit or task_hit or query_hit
 
 
 # ── Message processing ────────────────────────────────────────────────────────
@@ -421,6 +452,25 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
         except Exception as e:
             print(f"[DoubleA] 待辦錯誤：{e}")
             reply = "⚠️ 待辦事項記錄失敗，請稍後再試。"
+        _respond(reply)
+
+    elif msg_type == "query":
+        start_date_str = result.get("start_date", "")
+        end_date_str = result.get("end_date", "") or start_date_str
+        label = result.get("label", "查詢日期")
+        try:
+            start_dt = datetime.fromisoformat(start_date_str)
+            end_dt = datetime.fromisoformat(end_date_str)
+            is_range = start_date_str != end_date_str
+            if is_range:
+                events = list_events_for_range(start_dt, end_dt)
+            else:
+                events = list_events_for_date(start_dt)
+            reply = _format_calendar_query_result(label, events, is_range)
+            print(f"[DoubleA] 行事曆查詢：{label} {start_date_str}~{end_date_str}，{len(events)} 筆")
+        except Exception as e:
+            print(f"[DoubleA] 行事曆查詢錯誤：{e}")
+            reply = "⚠️ 查詢行事曆失敗，請稍後再試。"
         _respond(reply)
 
     else:

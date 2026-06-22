@@ -25,14 +25,20 @@ def parse_message(message: str, current_time: datetime) -> dict:
 
     prompt = f"""現在時間：{now_str}（台北時間，UTC+8）
 
-分析這則 LINE 訊息，輸出以下四種 JSON 格式之一。
+分析這則 LINE 訊息，輸出以下五種 JSON 格式之一。
 
 ━━ 判斷規則 ━━
+
+【query】查詢行事曆意圖（如「今天有什麼事」「明天的行程」「這週有什麼」「6月25日有什麼」「下週有沒有事」）
+→ 輸出：{{"type": "query", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "label": "今天"}}
+  - 單日查詢：start_date = end_date（同一天）
+  - 週查詢（這週/本週/下週）：start_date = 該週週一，end_date = 該週週日
+  - label 用自然中文，如「今天」「明天」「6月25日」「這週」「下週」
 
 【modify】含有「修正/更改/改一下/調整/修改」且指向剛才建立的行事曆
 → 輸出：{{"type": "modify"}}
 
-【calendar】含有「明確時間/日期 + 未來的事」
+【calendar】含有「明確時間/日期 + 未來的事（新增/建立意圖）」
 → 輸出：{{"type": "calendar", "events": [...]}}
 ⚠️ events 必須是陣列，每個獨立的時間點都是一筆獨立事件
 ⚠️ 不可把第二個時間點當作第一個事件的 end，它們是兩個不同事件
@@ -40,16 +46,17 @@ def parse_message(message: str, current_time: datetime) -> dict:
 【todo】有任務性質但沒有明確時間
 → 輸出：{{"type": "todo", "title": "任務簡短描述", "description": null}}
 
-【ignore】日常聊天、情感、問句、已發生的事
+【ignore】日常聊天、情感、已發生的事
 → 輸出：{{"type": "ignore"}}
 
-━━ 多事件範例 ━━
+━━ 範例 ━━
 
-訊息：「明天早上7點半出發去台北，後天晚上10點回到玉里」
-正確輸出：
+訊息：「今天有什麼事」→ {{"type": "query", "start_date": "{now_str[:10]}", "end_date": "{now_str[:10]}", "label": "今天"}}
+訊息：「這週有什麼行程」→ {{"type": "query", "start_date": "（該週週一）", "end_date": "（該週週日）", "label": "這週"}}
+訊息：「明天早上7點半出發去台北，後天晚上10點回到玉里」→
 {{"type": "calendar", "events": [
-  {{"title": "出發去台北", "start": "2026-05-26T07:30:00+08:00", "end": "2026-05-26T08:30:00+08:00", "location": "台北"}},
-  {{"title": "回到玉里", "start": "2026-05-27T22:00:00+08:00", "end": "2026-05-27T23:00:00+08:00", "location": "玉里"}}
+  {{"title": "出發去台北", "start": "ISO8601+08:00", "end": "ISO8601+08:00", "location": "台北"}},
+  {{"title": "回到玉里", "start": "ISO8601+08:00", "end": "ISO8601+08:00", "location": "玉里"}}
 ]}}
 
 ━━ 現在分析這則訊息 ━━
@@ -84,6 +91,9 @@ events 陣列格式：每筆事件 = {{"title": "中文標題10字內", "start":
             },
             "title":       {"type": "STRING"},
             "description": {"type": "STRING"},
+            "start_date":  {"type": "STRING"},
+            "end_date":    {"type": "STRING"},
+            "label":       {"type": "STRING"},
         },
         "required": ["type"],
     }
