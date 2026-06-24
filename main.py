@@ -131,8 +131,24 @@ def _reply_line(reply_token: str, text: str) -> None:
         raise
 
 
+def _send_line_msg(chat_id: str, msg_obj, reply_token: str | None, _used: list[bool] | None) -> None:
+    """reply_token 未用過時用 reply_message（免費），否則 fallback 到 push_message。"""
+    if reply_token and _used is not None and not _used[0]:
+        try:
+            with ApiClient(line_config) as api_client:
+                MessagingApi(api_client).reply_message(
+                    ReplyMessageRequest(reply_token=reply_token, messages=[msg_obj])
+                )
+            _used[0] = True
+            return
+        except Exception as e:
+            print(f"[DoubleA] reply_message 失敗，改用 push：{e}")
+    with ApiClient(line_config) as api_client:
+        MessagingApi(api_client).push_message(PushMessageRequest(to=chat_id, messages=[msg_obj]))
 
-def _push_delete_picker(chat_id: str, events: list[dict]) -> None:
+
+
+def _push_delete_picker(chat_id: str, events: list[dict], reply_token: str | None = None, _used: list[bool] | None = None) -> None:
     """發送含 Quick Reply 按鈕的行程選擇訊息。"""
     lines = ["以下是未來 7 天的行程，請點選要刪除的：\n"]
     qr_items = []
@@ -149,13 +165,10 @@ def _push_delete_picker(chat_id: str, events: list[dict]) -> None:
         text="\n".join(lines),
         quick_reply=QuickReply(items=qr_items),
     )
-    with ApiClient(line_config) as api_client:
-        MessagingApi(api_client).push_message(
-            PushMessageRequest(to=chat_id, messages=[msg])
-        )
+    _send_line_msg(chat_id, msg, reply_token, _used)
 
 
-def _push_edit_picker(chat_id: str, events: list[dict]) -> None:
+def _push_edit_picker(chat_id: str, events: list[dict], reply_token: str | None = None, _used: list[bool] | None = None) -> None:
     """發送含 Quick Reply 按鈕的行程選擇訊息（修改用）。"""
     lines = ["以下是未來 7 天的行程，請點選要修改的：\n"]
     qr_items = []
@@ -175,13 +188,10 @@ def _push_edit_picker(chat_id: str, events: list[dict]) -> None:
         text="\n".join(lines),
         quick_reply=QuickReply(items=qr_items),
     )
-    with ApiClient(line_config) as api_client:
-        MessagingApi(api_client).push_message(
-            PushMessageRequest(to=chat_id, messages=[msg])
-        )
+    _send_line_msg(chat_id, msg, reply_token, _used)
 
 
-def _push_field_picker(chat_id: str, event_id: str, event_title: str) -> None:
+def _push_field_picker(chat_id: str, event_id: str, event_title: str, reply_token: str | None = None, _used: list[bool] | None = None) -> None:
     """讓使用者選要修改哪個欄位（標題／時間／地點）。"""
     qr_items = [
         QuickReplyItem(action=MessageAction(
@@ -201,19 +211,16 @@ def _push_field_picker(chat_id: str, event_id: str, event_title: str) -> None:
         text=f"要修改【{event_title}】的哪個欄位？",
         quick_reply=QuickReply(items=qr_items),
     )
-    with ApiClient(line_config) as api_client:
-        MessagingApi(api_client).push_message(
-            PushMessageRequest(to=chat_id, messages=[msg])
-        )
+    _send_line_msg(chat_id, msg, reply_token, _used)
 
 
-def _push_shopping_list(chat_id: str, items: list[dict]) -> None:
+def _push_shopping_list(chat_id: str, items: list[dict], reply_token: str | None = None, _used: list[bool] | None = None) -> None:
     """顯示購物清單，並附上 Quick Reply 按鈕讓使用者標記已買。"""
     pending = [it for it in items if not it["done"]]
     done = [it for it in items if it["done"]]
 
     if not pending and not done:
-        _push_line(chat_id, "🛒 購物清單是空的！\n\n用「+買 物品名稱」新增品項")
+        _send_line_msg(chat_id, TextMessage(text="🛒 購物清單是空的！\n\n用「+買 物品名稱」新增品項"), reply_token, _used)
         return
 
     lines = ["🛒 購物清單\n"]
@@ -239,16 +246,13 @@ def _push_shopping_list(chat_id: str, items: list[dict]) -> None:
         msg = TextMessage(text="\n".join(lines), quick_reply=QuickReply(items=qr_items))
     else:
         msg = TextMessage(text="\n".join(lines))
-    with ApiClient(line_config) as api_client:
-        MessagingApi(api_client).push_message(
-            PushMessageRequest(to=chat_id, messages=[msg])
-        )
+    _send_line_msg(chat_id, msg, reply_token, _used)
 
 
-def _push_notes(chat_id: str, notes: list[dict]) -> None:
+def _push_notes(chat_id: str, notes: list[dict], reply_token: str | None = None, _used: list[bool] | None = None) -> None:
     """顯示所有筆記，附 Quick Reply 按鈕刪除各筆。"""
     if not notes:
-        _push_line(chat_id, "📓 筆記本是空的！\n\n用「+記 內容」新增筆記")
+        _send_line_msg(chat_id, TextMessage(text="📓 筆記本是空的！\n\n用「+記 內容」新增筆記"), reply_token, _used)
         return
 
     lines = [f"📓 筆記本（{len(notes)} 筆）\n"]
@@ -266,16 +270,13 @@ def _push_notes(chat_id: str, notes: list[dict]) -> None:
         msg = TextMessage(text="\n\n".join(lines), quick_reply=QuickReply(items=qr_items))
     else:
         msg = TextMessage(text="\n\n".join(lines))
-    with ApiClient(line_config) as api_client:
-        MessagingApi(api_client).push_message(
-            PushMessageRequest(to=chat_id, messages=[msg])
-        )
+    _send_line_msg(chat_id, msg, reply_token, _used)
 
 
-def _push_birthday_list(chat_id: str, birthdays: list[dict]) -> None:
+def _push_birthday_list(chat_id: str, birthdays: list[dict], reply_token: str | None = None, _used: list[bool] | None = None) -> None:
     """顯示生日清單，附 Quick Reply 刪除按鈕。"""
     if not birthdays:
-        _push_line(chat_id, "🎂 生日清單是空的！\n\n用「+生日 名字 月/日」新增")
+        _send_line_msg(chat_id, TextMessage(text="🎂 生日清單是空的！\n\n用「+生日 名字 月/日」新增"), reply_token, _used)
         return
 
     lines = [f"🎂 生日清單（{len(birthdays)} 筆）\n"]
@@ -294,10 +295,7 @@ def _push_birthday_list(chat_id: str, birthdays: list[dict]) -> None:
         msg = TextMessage(text="\n".join(lines), quick_reply=QuickReply(items=qr_items))
     else:
         msg = TextMessage(text="\n".join(lines))
-    with ApiClient(line_config) as api_client:
-        MessagingApi(api_client).push_message(
-            PushMessageRequest(to=chat_id, messages=[msg])
-        )
+    _send_line_msg(chat_id, msg, reply_token, _used)
 
 
 def birthday_reminder_job() -> None:
@@ -582,13 +580,18 @@ def send_event_reminder(chat_id: str, title: str, start_str: str) -> None:
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
-def handle_command(text: str, chat_id: str) -> bool:
+def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> bool:
+    _used: list[bool] = [False]
+
+    def _respond(msg: str) -> None:
+        _send_line_msg(chat_id, TextMessage(text=msg), reply_token, _used)
+
     if text.strip() in ("待辦清單", "待辦", "todo", "TODO"):
         try:
             tasks = get_pending_tasks()
-            _push_line(chat_id, _format_todo_list(tasks))
+            _respond(_format_todo_list(tasks))
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 無法取得待辦清單：{e}")
+            _respond(f"⚠️ 無法取得待辦清單：{e}")
         return True
 
     if text.startswith("完成 ") or text.startswith("done "):
@@ -599,9 +602,9 @@ def handle_command(text: str, chat_id: str) -> bool:
                 msg = f"✅ 已完成：【{title}】\n\n{_cheer_complete()}"
             else:
                 msg = f"❓ 找不到包含「{keyword}」的待辦事項"
-            _push_line(chat_id, msg)
+            _respond(msg)
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 標記失敗：{e}")
+            _respond(f"⚠️ 標記失敗：{e}")
         return True
 
     if text.lower().startswith("del "):
@@ -612,42 +615,42 @@ def handle_command(text: str, chat_id: str) -> bool:
                 msg = f"✅ 已完成：【{title}】\n\n{_cheer_complete()}"
             else:
                 msg = f"❓ 找不到第 {n} 項待辦事項"
-            _push_line(chat_id, msg)
+            _respond(msg)
         except ValueError:
-            _push_line(chat_id, "❓ 格式錯誤，請輸入「del 1」")
+            _respond("❓ 格式錯誤，請輸入「del 1」")
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 標記失敗：{e}")
+            _respond(f"⚠️ 標記失敗：{e}")
         return True
 
     if text.strip() == "刪除行程":
         try:
             events = list_upcoming_events(days=7)
             if not events:
-                _push_line(chat_id, "📅 未來 7 天沒有行程可以刪除。")
+                _respond("📅 未來 7 天沒有行程可以刪除。")
             else:
-                _push_delete_picker(chat_id, events)
+                _push_delete_picker(chat_id, events, reply_token, _used)
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 無法取得行程：{e}")
+            _respond(f"⚠️ 無法取得行程：{e}")
         return True
 
     if text.startswith("確認刪除 "):
         event_id = text.split("確認刪除 ", 1)[1].strip()
         try:
             title = delete_event_by_id(event_id)
-            _push_line(chat_id, f"✅ 已刪除：【{title}】")
+            _respond(f"✅ 已刪除：【{title}】")
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 刪除失敗：{e}")
+            _respond(f"⚠️ 刪除失敗：{e}")
         return True
 
     if text.strip() == "修改行程":
         try:
             events = list_upcoming_events(days=7)
             if not events:
-                _push_line(chat_id, "📅 未來 7 天沒有行程可以修改。")
+                _respond("📅 未來 7 天沒有行程可以修改。")
             else:
-                _push_edit_picker(chat_id, events)
+                _push_edit_picker(chat_id, events, reply_token, _used)
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 無法取得行程：{e}")
+            _respond(f"⚠️ 無法取得行程：{e}")
         return True
 
     if text.startswith("選擇修改 "):
@@ -657,9 +660,9 @@ def handle_command(text: str, chat_id: str) -> bool:
         event_id = parts[0]
         event_title = parts[1] if len(parts) > 1 else "（無標題）"
         try:
-            _push_field_picker(chat_id, event_id, event_title)
+            _push_field_picker(chat_id, event_id, event_title, reply_token, _used)
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 錯誤：{e}")
+            _respond(f"⚠️ 錯誤：{e}")
         return True
 
     if text.startswith("修改欄位 "):
@@ -673,7 +676,7 @@ def handle_command(text: str, chat_id: str) -> bool:
             field_name = {"title": "標題", "start": "時間", "location": "地點"}.get(field, field)
             hint = {"title": "（例如：家庭聚會）", "start": "（例如：明天下午3點）", "location": "（例如：教會）"}.get(field, "")
             save_pending_edit(chat_id, {"event_id": event_id, "field": field, "title": event_title})
-            _push_line(chat_id, f"請輸入【{event_title}】的新{field_name}：\n{hint}\n\n輸入「取消」可放棄修改")
+            _respond(f"請輸入【{event_title}】的新{field_name}：\n{hint}\n\n輸入「取消」可放棄修改")
         return True
 
     # ── 購物清單 ──────────────────────────────────────────────────────────────
@@ -684,27 +687,27 @@ def handle_command(text: str, chat_id: str) -> bool:
         try:
             added = add_items(names)
             if added:
-                _push_line(chat_id, "🛒 已加入購物清單：\n" + "\n".join(f"• {n}" for n in added))
+                _respond("🛒 已加入購物清單：\n" + "\n".join(f"• {n}" for n in added))
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 新增失敗：{e}")
+            _respond(f"⚠️ 新增失敗：{e}")
         return True
 
     if text.strip() == "購物清單":
         try:
-            _push_shopping_list(chat_id, get_items())
+            _push_shopping_list(chat_id, get_items(), reply_token, _used)
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 無法取得購物清單：{e}")
+            _respond(f"⚠️ 無法取得購物清單：{e}")
         return True
 
     if text.strip() == "清除已買":
         try:
             count = clear_done()
             if count:
-                _push_line(chat_id, f"✅ 已清除 {count} 個買完的品項")
+                _respond(f"✅ 已清除 {count} 個買完的品項")
             else:
-                _push_line(chat_id, "❓ 沒有已買完的品項可清除")
+                _respond("❓ 沒有已買完的品項可清除")
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 清除失敗：{e}")
+            _respond(f"⚠️ 清除失敗：{e}")
         return True
 
     if text.startswith("買到 "):
@@ -718,16 +721,16 @@ def handle_command(text: str, chat_id: str) -> bool:
                 not_found_msg = f"❓ 找不到包含「{rest}」的品項"
 
             if not name:
-                _push_line(chat_id, not_found_msg)
+                _respond(not_found_msg)
             else:
                 items = get_items()
                 pending = [it for it in items if not it["done"]]
                 if not pending:
-                    _push_line(chat_id, f"✅ 買到了：{name}\n\n🎉 全部買完了！輸入「清除已買」可清空清單。")
+                    _respond(f"✅ 買到了：{name}\n\n🎉 全部買完了！輸入「清除已買」可清空清單。")
                 else:
-                    _push_shopping_list(chat_id, items)
+                    _push_shopping_list(chat_id, items, reply_token, _used)
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 標記失敗：{e}")
+            _respond(f"⚠️ 標記失敗：{e}")
         return True
 
     # ── 記事本 ────────────────────────────────────────────────────────────────
@@ -735,20 +738,20 @@ def handle_command(text: str, chat_id: str) -> bool:
     if text.startswith("+記"):
         content = text[len("+記"):].strip()
         if not content:
-            _push_line(chat_id, "❓ 請輸入筆記內容，例如：+記 重要事項")
+            _respond("❓ 請輸入筆記內容，例如：+記 重要事項")
             return True
         try:
             note = add_note(content)
-            _push_line(chat_id, f"📓 已記下：\n\n{note['content']}")
+            _respond(f"📓 已記下：\n\n{note['content']}")
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 新增失敗：{e}")
+            _respond(f"⚠️ 新增失敗：{e}")
         return True
 
     if text.strip() == "筆記":
         try:
-            _push_notes(chat_id, get_notes())
+            _push_notes(chat_id, get_notes(), reply_token, _used)
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 無法取得筆記：{e}")
+            _respond(f"⚠️ 無法取得筆記：{e}")
         return True
 
     if text.startswith("刪筆記 "):
@@ -757,13 +760,13 @@ def handle_command(text: str, chat_id: str) -> bool:
             try:
                 removed = delete_note_by_index(int(rest))
                 if removed:
-                    _push_line(chat_id, f"🗑 已刪除筆記：\n\n{removed}")
+                    _respond(f"🗑 已刪除筆記：\n\n{removed}")
                 else:
-                    _push_line(chat_id, f"❓ 找不到第 {rest} 筆筆記")
+                    _respond(f"❓ 找不到第 {rest} 筆筆記")
             except Exception as e:
-                _push_line(chat_id, f"⚠️ 刪除失敗：{e}")
+                _respond(f"⚠️ 刪除失敗：{e}")
         else:
-            _push_line(chat_id, "❓ 請輸入筆記編號，例如：刪筆記 1")
+            _respond("❓ 請輸入筆記編號，例如：刪筆記 1")
         return True
 
     # ── 生日提醒 ──────────────────────────────────────────────────────────────
@@ -772,26 +775,26 @@ def handle_command(text: str, chat_id: str) -> bool:
         rest = text[len("+生日"):].strip()
         parts = rest.split(None, 1)
         if len(parts) < 2:
-            _push_line(chat_id, "格式：+生日 名字 日期\n範例：+生日 媽媽 3/15\n　　　+生日 Ginny 1990/6/10")
+            _respond("格式：+生日 名字 日期\n範例：+生日 媽媽 3/15\n　　　+生日 Ginny 1990/6/10")
             return True
         name, date_str = parts[0], parts[1]
         month, day, year = parse_birthday_date(date_str)
         if not month:
-            _push_line(chat_id, f"⚠️ 無法解析日期「{date_str}」\n格式範例：3/15 或 1990/3/15")
+            _respond(f"⚠️ 無法解析日期「{date_str}」\n格式範例：3/15 或 1990/3/15")
             return True
         try:
             entry = add_birthday(name, month, day, year)
             year_part = f"（{year} 年）" if year else ""
-            _push_line(chat_id, f"🎂 已記錄：{entry['name']}｜{month}月{day}日{year_part}")
+            _respond(f"🎂 已記錄：{entry['name']}｜{month}月{day}日{year_part}")
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 新增失敗：{e}")
+            _respond(f"⚠️ 新增失敗：{e}")
         return True
 
     if text.strip() == "生日清單":
         try:
-            _push_birthday_list(chat_id, get_birthdays())
+            _push_birthday_list(chat_id, get_birthdays(), reply_token, _used)
         except Exception as e:
-            _push_line(chat_id, f"⚠️ 無法取得生日清單：{e}")
+            _respond(f"⚠️ 無法取得生日清單：{e}")
         return True
 
     if text.startswith("刪生日 "):
@@ -800,13 +803,13 @@ def handle_command(text: str, chat_id: str) -> bool:
             try:
                 name = delete_birthday_by_index(int(rest))
                 if name:
-                    _push_line(chat_id, f"✅ 已刪除：{name} 的生日記錄")
+                    _respond(f"✅ 已刪除：{name} 的生日記錄")
                 else:
-                    _push_line(chat_id, f"❓ 找不到第 {rest} 筆")
+                    _respond(f"❓ 找不到第 {rest} 筆")
             except Exception as e:
-                _push_line(chat_id, f"⚠️ 刪除失敗：{e}")
+                _respond(f"⚠️ 刪除失敗：{e}")
         else:
-            _push_line(chat_id, "❓ 請輸入編號，例如：刪生日 1")
+            _respond("❓ 請輸入編號，例如：刪生日 1")
         return True
 
     return False
@@ -923,7 +926,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
         except Exception as _e:
             print(f"[DoubleA] _respond push 最終失敗：{_e}")
 
-    if handle_command(text, chat_id):
+    if handle_command(text, chat_id, reply_token):
         return
 
     # 處理待輸入的欄位值（「修改行程」流程最後一步）
