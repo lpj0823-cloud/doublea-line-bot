@@ -63,6 +63,8 @@ from shopping_service import (
     mark_done_by_keyword,
 )
 from notes_service import add_note, delete_note_by_index, get_notes
+from proverbs_service import get_todays_proverbs, get_proverbs_header
+from rate_limiter import check_rate_limit
 from birthday_service import (
     add_birthday,
     delete_birthday_by_index,
@@ -90,8 +92,9 @@ async def lifespan(_app: FastAPI):
     scheduler.add_job(morning_briefing_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
     scheduler.add_job(birthday_reminder_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
     scheduler.add_job(daily_reminder_job, CronTrigger(hour=17, minute=0, timezone=TAIPEI_TZ))
+    scheduler.add_job(proverbs_job, CronTrigger(hour=7, minute=5, timezone=TAIPEI_TZ))
     scheduler.start()
-    print("[DoubleA] 排程器已啟動：07:00 早安行程＋生日提醒、17:00 待辦提醒")
+    print("[DoubleA] 排程器已啟動：07:00 早安行程＋生日提醒、07:05 每日箴言、17:00 待辦提醒")
     yield
     scheduler.shutdown()
     print("[DoubleA] 排程器已停止")
@@ -276,6 +279,28 @@ def birthday_reminder_job() -> None:
         print(f"[DoubleA] 生日提醒發送：{', '.join(b['name'] for b in birthdays)}")
     except Exception as e:
         print(f"[DoubleA] 生日提醒發送失敗：{e}")
+
+
+def proverbs_job() -> None:
+    """每日 07:05 排程：推播今日箴言（中文＋英文各一則）。"""
+    chat_id = load_chat_id()
+    if not chat_id:
+        print("[DoubleA] 箴言排程：找不到 chat_id，略過")
+        return
+    now = datetime.now(TAIPEI_TZ)
+    header = get_proverbs_header(now)
+    try:
+        zh_text, en_text = get_todays_proverbs(now)
+    except Exception as e:
+        print(f"[DoubleA] 箴言排程：取得經文失敗 {e}")
+        return
+    try:
+        _push_line(chat_id, f"🕊️ 今日箴言\n\n{header}")
+        _push_line(chat_id, zh_text)
+        _push_line(chat_id, en_text)
+        print(f"[DoubleA] 箴言發送成功")
+    except Exception as e:
+        print(f"[DoubleA] 箴言發送失敗：{e}")
 
 
 def morning_briefing_job() -> None:
@@ -746,6 +771,10 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
     # ── 餐廳推薦 ──────────────────────────────────────────────────────────────
 
     if text.strip() == "附近餐廳" or text.startswith("附近 "):
+        allowed, rate_msg = check_rate_limit(chat_id, "restaurant")
+        if not allowed:
+            _respond(rate_msg)
+            return True
         keyword = "" if text.strip() == "附近餐廳" else text[3:].strip()
         try:
             results = search_nearby_restaurants(keyword=keyword)
@@ -898,6 +927,12 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
         except Exception as e:
             print(f"[DoubleA] 行程欄位更新失敗：{e}")
             _respond("⚠️ 修改失敗，請稍後再試。")
+        return
+
+    # AI 速率限制檢查
+    allowed, rate_msg = check_rate_limit(chat_id, "ai")
+    if not allowed:
+        _respond(rate_msg)
         return
 
     if _should_notify(text):
