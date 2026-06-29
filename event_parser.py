@@ -35,36 +35,34 @@ def parse_message(message: str, current_time: datetime) -> dict:
 
     prompt = f"""現在時間：{now_str}（台北時間，UTC+8）
 
-分析這則 LINE 訊息，輸出以下六種 JSON 格式之一。
+分析這則 LINE 訊息，輸出以下幾種 JSON 格式之一。
 
-━━ 判斷規則 ━━
-
-【weather】天氣查詢意圖
-→ 輸出：{{"type": "weather", "period": "today"}}
-  - period: "today"、"tomorrow"、"week"
+【weather】天氣查詢
+輸出：{{"type": "weather", "period": "today"}}
+period: today / tomorrow / week
 
 【edit】修改特定行事曆活動
-→ 輸出：{{"type": "edit", "target_datetime": "ISO8601+08:00", "has_time": true, "title_hint": null, "new_start": null, "new_location": null}}
+輸出：{{"type": "edit", "target_datetime": "ISO8601+08:00", "has_time": true, "title_hint": null, "new_start": null, "new_location": null}}
 
 【delete】刪除行事曆活動
-→ 輸出：{{"type": "delete", "target_datetime": "ISO8601+08:00", "has_time": true, "title_hint": null}}
+輸出：{{"type": "delete", "target_datetime": "ISO8601+08:00", "has_time": true, "title_hint": null}}
 
 【query】查詢行事曆
-→ 輸出：{{"type": "query", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "label": "今天"}}
+輸出：{{"type": "query", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "label": "今天"}}
 
-【modify】修改剛才建立的行事曆（沒有指定目標）
-→ 輸出：{{"type": "modify"}}
+【modify】修改剛才建立的行事曆
+輸出：{{"type": "modify"}}
 
 【calendar】新增行事曆事件
-→ 輸出：{{"type": "calendar", "events": [{{"title": "標題", "start": "ISO8601+08:00", "end": "ISO8601+08:00", "location": null}}]}}
+輸出：{{"type": "calendar", "events": [{{"title": "標題", "start": "ISO8601+08:00", "end": "ISO8601+08:00", "location": null}}]}}
 
 【todo】有任務性質但沒有明確時間
-→ 輸出：{{"type": "todo", "title": "任務描述", "description": null}}
+輸出：{{"type": "todo", "title": "任務描述", "description": null}}
 
 【ignore】日常聊天或一般問題
-→ 輸出：{{"type": "ignore"}}
+輸出：{{"type": "ignore"}}
 
-━━ 規則 ━━
+規則：
 - 每個獨立時間點 = 一筆獨立事件
 - 若無結束時間：end = start + 1小時
 - 若只有日期無時間：start 用 09:00
@@ -106,6 +104,7 @@ def parse_new_datetime(text: str, current_time: datetime) -> str | None:
 
 
 def parse_image_for_event(image_bytes: bytes, mime_type: str, current_time: datetime) -> dict:
+    """用 Gemini Vision 分析圖片，提取行事曆事件。"""
     client = _gemini_client()
     now_str = current_time.strftime("%Y-%m-%d %H:%M")
 
@@ -113,10 +112,12 @@ def parse_image_for_event(image_bytes: bytes, mime_type: str, current_time: date
 
 分析這張圖片，提取其中的行事曆事件資訊。
 
-如果圖片包含「日期或時間 + 活動名稱」，輸出：{{"type": "calendar", "events": [...]}}
+如果圖片包含「日期或時間 + 活動名稱」，輸出：
+{{"type": "calendar", "events": [{{"title": "活動名稱", "start": "ISO8601+08:00", "end": "ISO8601+08:00", "location": null}}]}}
+
 若圖片沒有明確可建立的行事曆事件，輸出：{{"type": "no_event"}}
 
-events 格式：title, start(ISO8601+08:00), end(ISO8601+08:00), location(或null)
+規則：
 - 若無結束時間：start + 1小時
 - 只有日期無時間 → start 用 09:00
 - 每個獨立時間點 = 一筆獨立事件"""
@@ -128,4 +129,64 @@ events 格式：title, start(ISO8601+08:00), end(ISO8601+08:00), location(或nul
             "events": {
                 "type": "ARRAY",
                 "items": {
-                    "type":
+                    "type": "OBJECT",
+                    "properties": {
+                        "title": {"type": "STRING"},
+                        "start": {"type": "STRING"},
+                        "end": {"type": "STRING"},
+                        "location": {"type": "STRING"},
+                    },
+                    "required": ["title", "start", "end"],
+                },
+            },
+        },
+        "required": ["type"],
+    }
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[
+            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            types.Part.from_text(text=prompt),
+        ],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=response_schema,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
+    try:
+        return json.loads(response.text.strip())
+    except Exception:
+        return {"type": "no_event"}
+
+
+def parse_modification(instruction: str, original: dict, current_time: datetime) -> dict | None:
+    now_str = current_time.strftime("%Y-%m-%d %H:%M")
+
+    prompt = f"""現在時間：{now_str}（台北時間，UTC+8）
+
+原始行事曆事件：
+- 標題：{original["title"]}
+- 開始：{original["start"]}
+- 結束：{original["end"]}
+
+修改指令：「{instruction}」
+
+根據修改指令計算修改後的新時間，只回傳 JSON（不要加```）：
+{{"start": "新的ISO8601+08:00", "end": "新的ISO8601+08:00"}}
+
+規則：
+- 只改日期時，保留原本的時間
+- 只改時間時，保留原本的日期
+- end 與 start 的時間差距保持不變"""
+
+    try:
+        text = _call_claude(prompt)
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return json.loads(text.strip())
+    except Exception:
+        return None
