@@ -1242,18 +1242,14 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
                     add_receipt_expense(receipt, project_name)
                     _respond(format_receipt_result(receipt, project_name))
                 else:
+                    store = receipt.get('store', '不明')
+                    total = receipt.get('total', 0)
                     _respond(
-                        f"🧾 偵測到收據！
-
-"
-                        f"🏪 {receipt.get('store', '不明')}
-"
-                        f"💰 合計：{receipt.get('total', 0):,.0f}
-
-"
-                        f"⚠️ 請先建立專案再傳收據
-"
-                        f"例：+專案 日本旅行 6/30-7/4"
+                        f"🧾 偵測到收據！\n\n"
+                        f"🏪 {store}\n"
+                        f"💰 合計：${total:,.0f}\n\n"
+                        "⚠️ 請先建立專案再傳收據\n"
+                        "例：+專案 日本旅行 6/30-7/4"
                     )
             else:
                 # 不是收據也不是行程 → 提醒存相簿
