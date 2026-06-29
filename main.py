@@ -73,6 +73,14 @@ from birthday_service import (
     parse_birthday_date,
 )
 from restaurant_service import search_nearby_restaurants, format_restaurant_results
+from finance_service import (
+    create_project, get_project, list_projects, delete_project,
+    parse_expense_input, add_expense, get_expenses,
+    get_last_expense_any, attach_location, mark_photo_noted,
+    format_expense_confirmation, format_photo_reminder,
+    format_location_attached, format_project_list, format_project_detail,
+    parse_receipt_image, format_receipt_result, add_receipt_expense,
+)
 
 load_dotenv()
 
@@ -768,6 +776,80 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             _respond("❓ 請輸入編號，例如：刪生日 1")
         return True
 
+    # ── 記帳 ──────────────────────────────────────────────────────────────────
+
+    if text.startswith("+專案"):
+        rest = text[len("+專案"):].strip()
+        if not rest:
+            _respond("格式：+專案 名稱 說明\n例：+專案 日本旅行 6/30-7/4")
+            return True
+        parts = rest.split(None, 1)
+        name = parts[0]
+        description = parts[1] if len(parts) > 1 else ""
+        try:
+            existing = get_project(name)
+            if existing:
+                _respond(f"⚠️ 專案「{name}」已存在！\n用「專案 {name}」查看明細")
+            else:
+                create_project(name, description)
+                desc_str = f"\n📝 {description}" if description else ""
+                _respond(f"📂 已建立專案：【{name}】{desc_str}\n\n用「+花費 {name} 類別 人名:品項:金額」開始記帳！")
+        except Exception as e:
+            _respond(f"⚠️ 建立失敗：{e}")
+        return True
+
+    if text.startswith("+花費"):
+        rest = text[len("+花費"):].strip()
+        if not rest:
+            _respond("格式：+花費 專案 類別 地點 人名:品項:金額\n例：+花費 日本旅行 午餐 大阪餐廳 培正:拉麵:850 Ginny:壽司:1200")
+            return True
+        try:
+            parsed = parse_expense_input(rest)
+            if not parsed:
+                _respond("⚠️ 格式錯誤\n例：+花費 日本旅行 午餐 大阪餐廳 培正:拉麵:850 Ginny:壽司:1200")
+                return True
+            expense, doc_id = add_expense(parsed)
+            _respond(format_expense_confirmation(expense, parsed["project"]))
+        except ValueError as e:
+            _respond(f"⚠️ {e}")
+        except Exception as e:
+            _respond(f"⚠️ 記帳失敗：{e}")
+        return True
+
+    if text.strip() == "專案清單":
+        try:
+            projects = list_projects()
+            _respond(format_project_list(projects))
+        except Exception as e:
+            _respond(f"⚠️ 無法取得專案清單：{e}")
+        return True
+
+    if text.startswith("專案 "):
+        name = text[len("專案 "):].strip()
+        try:
+            project = get_project(name)
+            if not project:
+                _respond(f"❓ 找不到專案「{name}」\n用「專案清單」查看所有專案")
+            else:
+                expenses = get_expenses(name)
+                _respond(format_project_detail(project, expenses))
+        except Exception as e:
+            _respond(f"⚠️ 查詢失敗：{e}")
+        return True
+
+    if text.startswith("刪專案 "):
+        name = text[len("刪專案 "):].strip()
+        try:
+            project = get_project(name)
+            if not project:
+                _respond(f"❓ 找不到專案「{name}」")
+            else:
+                delete_project(name)
+                _respond(f"✅ 已刪除專案：【{name}】及所有花費記錄")
+        except Exception as e:
+            _respond(f"⚠️ 刪除失敗：{e}")
+        return True
+
     # ── 餐廳推薦 ──────────────────────────────────────────────────────────────
 
     if text.strip() == "附近餐廳" or text.startswith("附近 "):
@@ -1148,6 +1230,41 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
         return
 
     if result.get("type") != "calendar":
+        # 圖片不是行程 → 嘗試辨識為收據
+        try:
+            receipt = parse_receipt_image(image_bytes, mime_type)
+            if "error" not in receipt and receipt.get("total", 0) > 0:
+                # 成功辨識收據 → 找最近的專案記入
+                last = get_last_expense_any(chat_id)
+                if last:
+                    expense, doc_id = last
+                    project_name = expense.get("project", "")
+                    add_receipt_expense(receipt, project_name)
+                    _respond(format_receipt_result(receipt, project_name))
+                else:
+                    _respond(
+                        f"🧾 偵測到收據！
+
+"
+                        f"🏪 {receipt.get('store', '不明')}
+"
+                        f"💰 合計：{receipt.get('total', 0):,.0f}
+
+"
+                        f"⚠️ 請先建立專案再傳收據
+"
+                        f"例：+專案 日本旅行 6/30-7/4"
+                    )
+            else:
+                # 不是收據也不是行程 → 提醒存相簿
+                last = get_last_expense_any(chat_id)
+                if last:
+                    expense, doc_id = last
+                    mark_photo_noted(doc_id)
+                    project_name = expense.get("project", "")
+                    _respond(format_photo_reminder(expense, project_name))
+        except Exception as e:
+            print(f"[DoubleA] 圖片處理失敗：{e}")
         return
 
     events = result.get("events") or []
@@ -1227,6 +1344,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             message_id = msg.get("id", "")
             if message_id:
                 background_tasks.add_task(process_image, message_id, chat_id, reply_token)
+        elif msg.get("type") == "location":
+            title = msg.get("title", "")
+            address = msg.get("address", "")
+            lat = msg.get("latitude", 0)
+            lon = msg.get("longitude", 0)
+            background_tasks.add_task(process_location, title, address, lat, lon, chat_id, reply_token)
 
     return JSONResponse(content={"status": "ok"})
 
