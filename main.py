@@ -1017,8 +1017,11 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
         _respond(rate_msg)
         return
 
-    if _should_notify(text):
-        _push_line(chat_id, "⏳ 收到！處理中，請稍候...")
+    # 已移除「⏳ 收到！處理中…」推播：
+    #  1) 它用 push（推播）發送，會消耗 LINE 每月 push 額度；
+    #  2) push 額度用盡時會回傳 429，且原本這行沒有 try/except 保護，
+    #     會讓整個 process_message 崩潰，導致行事曆/待辦/天氣完全沒反應。
+    # 最終回覆本來就會用免費的 reply_token 送出，因此這則「處理中」通知可省略。
 
     result = parse_message(text, now)
     msg_type = result.get("type", "ignore")
