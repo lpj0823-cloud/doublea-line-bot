@@ -6,16 +6,14 @@ TAIPEI_TZ = pytz.timezone("Asia/Taipei")
 
 
 def _get_db():
+    # 與 state_service.py 一致：使用 google-cloud-firestore 的 Client()，
+    # 透過 Application Default Credentials 連線（Cloud Run 會自動用服務帳號）。
+    # 原本改用 firebase_admin + credentials.Certificate(GOOGLE_TOKEN_JSON) 是錯的：
+    #   1) firebase_admin 未列在 requirements.txt；
+    #   2) GOOGLE_TOKEN_JSON 是使用者 OAuth token，不是服務帳號金鑰。
     try:
-        import firebase_admin
-        from firebase_admin import credentials, firestore
-        if not firebase_admin._apps:
-            import json
-            token_json = os.environ.get("GOOGLE_TOKEN_JSON", "{}")
-            cred_dict = json.loads(token_json)
-            cred = credentials.Certificate(cred_dict)
-            firebase_admin.initialize_app(cred)
-        return firestore.client()
+        from google.cloud import firestore
+        return firestore.Client()
     except Exception as e:
         print(f"[Finance] Firestore 初始化失敗：{e}")
         raise

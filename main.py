@@ -1299,6 +1299,43 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
             _respond(reply)
 
 
+# ── Location（記帳 GPS 附加）────────────────────────────────────────────────────
+
+def process_location(title: str, address: str, lat: float, lon: float,
+                     chat_id: str, reply_token: str | None = None) -> None:
+    """背景任務：使用者傳送位置 → 附加 GPS 到最近一筆花費記錄。"""
+    print(f"[DoubleA] process_location：{title} ({lat},{lon}) chat_id={chat_id}")
+    save_chat_id(chat_id)
+
+    _used_reply: list[bool] = [False]
+
+    def _respond(msg: str) -> None:
+        if reply_token and not _used_reply[0]:
+            try:
+                _reply_line(reply_token, msg)
+                _used_reply[0] = True
+                return
+            except Exception as _e:
+                print(f"[DoubleA] location reply 失敗，改用 push：{_e}")
+        try:
+            _push_line(chat_id, msg)
+        except Exception as _e:
+            print(f"[DoubleA] location push 最終失敗：{_e}")
+
+    try:
+        last = get_last_expense_any(chat_id)
+        if not last:
+            _respond("📍 收到位置！但目前沒有花費記錄可附加。\n請先用「+花費 ...」記帳，再傳位置給我。")
+            return
+        expense, doc_id = last
+        attach_location(doc_id, title, float(lat), float(lon), address)
+        gps = {"title": title, "lat": lat, "lon": lon, "address": address}
+        _respond(format_location_attached(expense, gps))
+    except Exception as e:
+        print(f"[DoubleA] 位置附加失敗：{e}")
+        _respond("⚠️ 位置記錄失敗，請稍後再試。")
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.post("/webhook")

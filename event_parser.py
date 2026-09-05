@@ -6,6 +6,11 @@ import anthropic
 from google import genai
 from google.genai import types
 
+# 可用環境變數 ANTHROPIC_MODEL 覆寫。預設用目前有效的模型；
+# 原本寫死的 "claude-sonnet-4-6" 並非有效的模型 ID，會導致每次呼叫都失敗。
+# 目前可用選項（2026-09）：claude-haiku-4-5-20251001（便宜快速）、claude-sonnet-5（品質較高）。
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+
 
 def _claude_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -14,7 +19,7 @@ def _claude_client() -> anthropic.Anthropic:
 def _call_claude(prompt: str) -> str:
     client = _claude_client()
     message = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=ANTHROPIC_MODEL,
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )
