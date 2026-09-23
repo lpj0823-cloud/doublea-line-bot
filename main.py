@@ -1121,6 +1121,16 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
     # 最終回覆本來就會用免費的 reply_token 送出，因此這則「處理中」通知可省略。
 
     result = parse_message(text, now)
+    # 防呆：AI 有時（尤其多行訊息）會回傳 list 而非 dict，
+    # 若不處理，下一行的 result.get() 會 AttributeError 讓整個機器人沒反應。
+    if isinstance(result, list):
+        _events = [r for r in result if isinstance(r, dict) and r.get("start")]
+        if _events:
+            result = {"type": "calendar", "events": _events}
+        else:
+            result = next((r for r in result if isinstance(r, dict)), {"type": "ignore"})
+    if not isinstance(result, dict):
+        result = {"type": "ignore"}
     msg_type = result.get("type", "ignore")
     print(f"[DoubleA] 分類：{msg_type}　{result}")
 
