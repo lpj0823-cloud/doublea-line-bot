@@ -97,12 +97,14 @@ scheduler = AsyncIOScheduler(timezone=TAIPEI_TZ)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    scheduler.add_job(morning_briefing_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
-    scheduler.add_job(birthday_reminder_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
-    scheduler.add_job(daily_reminder_job, CronTrigger(hour=17, minute=0, timezone=TAIPEI_TZ))
-    scheduler.add_job(proverbs_job, CronTrigger(hour=7, minute=5, timezone=TAIPEI_TZ))
+    # 只保留兩則自動推播（節省 LINE 每月 push 額度）：
+    #   06:00 → 今天的行事曆
+    #   18:00 → 明天的行事曆
+    # 其餘功能（箴言、天氣、餐廳、待辦、購物、記帳…）一律改為「傳訊息才回覆」。
+    scheduler.add_job(morning_calendar_job, CronTrigger(hour=6, minute=0, timezone=TAIPEI_TZ))
+    scheduler.add_job(evening_calendar_job, CronTrigger(hour=18, minute=0, timezone=TAIPEI_TZ))
     scheduler.start()
-    print("[DoubleA] 排程器已啟動：07:00 早安行程＋生日提醒、07:05 每日箴言、17:00 待辦提醒")
+    print("[DoubleA] 排程器已啟動：06:00 今日行事曆、18:00 明日行事曆")
     yield
     scheduler.shutdown()
     print("[DoubleA] 排程器已停止")
@@ -287,6 +289,65 @@ def birthday_reminder_job() -> None:
         print(f"[DoubleA] 生日提醒發送：{', '.join(b['name'] for b in birthdays)}")
     except Exception as e:
         print(f"[DoubleA] 生日提醒發送失敗：{e}")
+
+
+def _format_day_events(events: list[dict]) -> str:
+    lines = []
+    for ev in events:
+        time_part = f"{ev['start_str']} " if ev.get("start_str") else ""
+        loc = ev.get("location", "")
+        loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
+        lines.append(f"📅 {time_part}【{ev['title']}】{loc_part}")
+    return "\n".join(lines)
+
+
+def morning_calendar_job() -> None:
+    """每日 06:00 排程：推播『今天』的行事曆。"""
+    chat_id = load_chat_id()
+    if not chat_id:
+        print("[DoubleA] 早上6點排程：找不到 chat_id，略過")
+        return
+    now = datetime.now(TAIPEI_TZ)
+    date_str = now.strftime("%-m月%-d日")
+    try:
+        events = list_events_for_date(now)
+    except Exception as e:
+        print(f"[DoubleA] 早上6點行事曆取得失敗：{e}")
+        return
+    if events:
+        msg = f"☀️ 早安！今天是 {date_str}，今日行程：\n\n{_format_day_events(events)}"
+    else:
+        msg = f"☀️ 早安！今天是 {date_str}\n\n今天沒有行程，祝您有美好的一天！"
+    try:
+        _push_line(chat_id, msg)
+        print(f"[DoubleA] 早上6點今日行事曆已發送：{len(events)} 筆")
+    except Exception as e:
+        print(f"[DoubleA] 早上6點推播失敗：{e}")
+
+
+def evening_calendar_job() -> None:
+    """每日 18:00 排程：推播『明天』的行事曆。"""
+    chat_id = load_chat_id()
+    if not chat_id:
+        print("[DoubleA] 晚上6點排程：找不到 chat_id，略過")
+        return
+    now = datetime.now(TAIPEI_TZ)
+    tomorrow = now + timedelta(days=1)
+    date_str = tomorrow.strftime("%-m月%-d日")
+    try:
+        events = list_events_for_date(tomorrow)
+    except Exception as e:
+        print(f"[DoubleA] 晚上6點行事曆取得失敗：{e}")
+        return
+    if events:
+        msg = f"🌙 提醒：明天 {date_str} 的行程：\n\n{_format_day_events(events)}"
+    else:
+        msg = f"🌙 晚安！明天（{date_str}）目前沒有安排行程。"
+    try:
+        _push_line(chat_id, msg)
+        print(f"[DoubleA] 晚上6點明日行事曆已發送：{len(events)} 筆")
+    except Exception as e:
+        print(f"[DoubleA] 晚上6點推播失敗：{e}")
 
 
 def proverbs_job() -> None:
@@ -547,11 +608,47 @@ def send_event_reminder(chat_id: str, title: str, start_str: str) -> None:
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
+def _menu_text() -> str:
+    return (
+        "🙏 平安！我是培正家AI小幫手。\n"
+        "以下功能隨時傳訊息給我就能用：\n\n"
+        "📅 行事曆\n"
+        "・「明天下午3點開會」→ 自動加入\n"
+        "・「今天有什麼行程」「這週有什麼」→ 查詢\n"
+        "・「刪除行程」「修改行程」→ 選單操作\n\n"
+        "📋 待辦：「記得買菜」新增；「待辦」查看；「完成 買菜」或「del 1」完成\n"
+        "🛒 購物：「+買 牛奶」；「購物清單」；「買到 1」\n"
+        "📓 筆記：「+記 內容」；「筆記」；「刪筆記 1」\n"
+        "🎂 生日：「+生日 媽媽 3/15」；「生日清單」；「刪生日 1」\n"
+        "💰 記帳：「+專案 日本旅行」；「+花費 日本旅行 午餐 850」；「專案清單」\n"
+        "🍽️ 餐廳：「附近餐廳」或「附近 火鍋」\n"
+        "🌦️ 天氣：「今天天氣」「明天天氣」「這週天氣」\n"
+        "📖 箴言：傳「箴言」\n\n"
+        "⏰ 自動提醒：每天早上 6:00 推「今天」的行程、晚上 18:00 推「明天」的行程。"
+    )
+
+
 def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> bool:
     _used: list[bool] = [False]
 
     def _respond(msg: str) -> None:
         _send_line_msg(chat_id, TextMessage(text=msg), reply_token, _used)
+
+    # 「平安」= 顯示功能選單
+    if text.strip() in ("平安", "選單", "功能", "menu", "help", "?", "？"):
+        _respond(_menu_text())
+        return True
+
+    # 「箴言」= 即時回覆今日箴言（改為傳訊息才回，不再自動推播）
+    if text.strip() in ("箴言", "每日箴言"):
+        try:
+            now = datetime.now(TAIPEI_TZ)
+            header = get_proverbs_header(now)
+            zh_text, en_text = get_todays_proverbs(now)
+            _respond(f"{header}\n\n{zh_text}\n\n{en_text}")
+        except Exception as e:
+            _respond("⚠️ 箴言暫時無法取得，請稍後再試。")
+        return True
 
     if text.strip() in ("待辦清單", "待辦", "todo", "TODO"):
         try:
