@@ -17,7 +17,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from linebot.v3.messaging import (
     ApiClient,
     Configuration,
@@ -1744,6 +1744,36 @@ async def check_reminders():
 @app.get("/health")
 def health():
     return {"status": "ok", "bot": "DoubleA", "env": "cloud" if os.environ.get("K_SERVICE") else "local"}
+
+
+# ── 首頁／隱私權政策：純粹為了滿足 Google OAuth consent screen 發佈到
+# 「正式環境」時要求填寫的「應用程式首頁」與「隱私權政策網址」，
+# 本機器人僅供培正家家人私人使用，不對外公開招募使用者。
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<title>培正家AI小幫手</title></head><body style="font-family:sans-serif;max-width:600px;margin:40px auto;line-height:1.7">
+<h1>培正家AI小幫手</h1>
+<p>這是培正家的私人 LINE 家庭助理機器人，僅供家人使用，協助管理行事曆、待辦事項、購物清單、記帳與天氣查詢等日常事務。</p>
+<p>本服務不對外公開招募使用者。</p>
+<p><a href="/privacy">隱私權政策</a></p>
+</body></html>"""
+
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy():
+    return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<title>隱私權政策 － 培正家AI小幫手</title></head><body style="font-family:sans-serif;max-width:600px;margin:40px auto;line-height:1.7">
+<h1>隱私權政策</h1>
+<p>培正家AI小幫手（下稱「本服務」）是僅供培正家家人使用的私人 LINE 機器人，不對外公開招募使用者，也不會將任何資料提供、販售或分享給無關第三方。</p>
+<h2>蒐集的資料</h2>
+<p>本服務會處理使用者在 LINE 對話中主動提供的文字、照片與位置資訊，用於建立行事曆事件、待辦事項、購物清單、記帳記錄等功能，並經授權存取使用者的 Google 日曆與 Google Tasks 以完成上述功能。</p>
+<h2>資料儲存與使用</h2>
+<p>相關資料僅儲存於本服務的雲端資料庫與使用者本人的 Google 帳號（日曆／Tasks）中，僅用於提供上述功能，不做其他用途。</p>
+<h2>聯絡方式</h2>
+<p>如有任何問題，請透過 LINE 直接聯繫本服務管理者。</p>
+</body></html>"""
 
 
 if __name__ == "__main__":
