@@ -1096,7 +1096,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
     # 圖片＋文字說明才觸發行事曆：
     # 剛剛有傳照片、且這則文字包含觸發語 → 用那張照片建立行程，其餘文字判斷都跳過。
     if _is_calendar_trigger(text) and load_pending_image(chat_id):
-        process_image_as_calendar(chat_id, reply_token)
+        process_image_as_calendar(chat_id, reply_token, text)
         return
 
     if handle_command(text, chat_id, reply_token):
@@ -1396,8 +1396,14 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
         print(f"[DoubleA] 圖片處理失敗：{e}")
 
 
-def process_image_as_calendar(chat_id: str, reply_token: str | None = None) -> None:
-    """使用者傳完照片後接著輸入「加到行事曆」等觸發語 → 才真正解析圖片並建立行程。"""
+def process_image_as_calendar(
+    chat_id: str, reply_token: str | None = None, trigger_text: str | None = None
+) -> None:
+    """使用者傳完照片後接著輸入「加到行事曆」等觸發語 → 才真正解析圖片並建立行程。
+
+    trigger_text：使用者輸入的觸發語原文（例如「加到行事曆10/5」），
+    若照片本身沒有日期／標題，會優先採用這段文字裡的日期／時間線索。
+    """
     print(f"[DoubleA] process_image_as_calendar 開始：chat_id={chat_id}")
     now = datetime.now(TAIPEI_TZ)
     _used_reply: list[bool] = [False]
@@ -1440,7 +1446,7 @@ def process_image_as_calendar(chat_id: str, reply_token: str | None = None) -> N
         return
 
     try:
-        result = parse_image_for_event(image_bytes, mime_type, now)
+        result = parse_image_for_event(image_bytes, mime_type, now, text_hint=trigger_text)
     except Exception as e:
         _respond("⚠️ 圖片分析失敗，請稍後再試。")
         return

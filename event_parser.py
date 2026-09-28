@@ -108,19 +108,37 @@ def parse_new_datetime(text: str, current_time: datetime) -> str | None:
         return None
 
 
-def parse_image_for_event(image_bytes: bytes, mime_type: str, current_time: datetime) -> dict:
-    """用 Gemini Vision 分析圖片，提取行事曆事件。"""
+def parse_image_for_event(
+    image_bytes: bytes,
+    mime_type: str,
+    current_time: datetime,
+    text_hint: str | None = None,
+) -> dict:
+    """用 Gemini Vision 分析圖片，提取行事曆事件。
+
+    text_hint：使用者傳照片後接著輸入的觸發語文字（例如「加到行事曆10/5」）。
+    若照片本身沒有明確日期／標題，優先採用 text_hint 裡的日期／時間／標題線索，
+    而不是只看照片內容。
+    """
     client = _gemini_client()
     now_str = current_time.strftime("%Y-%m-%d %H:%M")
 
+    hint_block = ""
+    if text_hint and text_hint.strip():
+        hint_block = f"""
+
+使用者傳這張照片後，接著輸入了這段文字：「{text_hint.strip()}」
+- 如果照片本身沒有清楚的日期／時間，但這段文字裡有（例如「10/5」「明天下午3點」），請優先採用文字裡的日期／時間。
+- 如果照片沒有清楚的活動標題，可依照片內容或這段文字，給一個合理的標題（例如「午餐」「聚餐」）。"""
+
     prompt = f"""現在時間：{now_str}（台北時間 UTC+8）
 
-分析這張圖片，提取其中的行事曆事件資訊。
+分析這張圖片，提取其中的行事曆事件資訊。{hint_block}
 
-如果圖片包含「日期或時間 + 活動名稱」，輸出：
+如果圖片或上面的文字包含「日期或時間 + 活動內容」，輸出：
 {{"type": "calendar", "events": [{{"title": "活動名稱", "start": "ISO8601+08:00", "end": "ISO8601+08:00", "location": null}}]}}
 
-若圖片沒有明確可建立的行事曆事件，輸出：{{"type": "no_event"}}
+若圖片和文字都沒有明確可建立的行事曆事件（例如純粹一張食物照，也沒有提到任何日期），輸出：{{"type": "no_event"}}
 
 規則：
 - 若無結束時間：start + 1小時
