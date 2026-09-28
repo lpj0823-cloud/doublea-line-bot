@@ -1638,6 +1638,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 continue
             if source_type in ("group", "room"):
                 if BOT_MENTION.lower() not in text.lower():
+                    # 診斷用：群組訊息沒比對到標籤時，印出原始文字方便排查
+                    # （例如手動打字的 @ 跟 LINE「選取聯絡人」產生的標籤格式不同）。
+                    print(
+                        f"[DoubleA] 群組訊息未含標籤，略過：raw_text={text!r} "
+                        f"BOT_MENTION={BOT_MENTION!r}"
+                    )
                     continue
                 text = re.sub(re.escape(BOT_MENTION), "", text, flags=re.IGNORECASE).strip()
                 if not text:
