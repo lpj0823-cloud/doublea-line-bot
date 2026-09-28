@@ -5,6 +5,7 @@ import json
 import os
 import re
 import random
+import time
 import urllib.parse
 
 import requests
@@ -39,14 +40,17 @@ from event_parser import parse_image_for_event, parse_message, parse_modificatio
 from state_service import (
     add_reminder,
     clear_pending_edit,
+    clear_pending_image,
     get_due_reminders,
     load_chat_id,
     load_last_event,
     load_pending_edit,
+    load_pending_image,
     mark_reminder_sent,
     save_chat_id,
     save_last_event,
     save_pending_edit,
+    save_pending_image,
 )
 from todo_service import (
     TASKS_URL,
@@ -91,6 +95,23 @@ TAIPEI_TZ = pytz.timezone("Asia/Taipei")
 REMINDER_MINUTES = 120
 BOT_NAME = "培正家AI小幫手"
 BOT_MENTION = f"@{BOT_NAME}"
+
+# 圖片＋文字說明才觸發行事曆：
+# 傳照片後，只有在 PENDING_IMAGE_TTL_SECONDS 秒內接著輸入下列關鍵字，
+# 才會用那張照片建立行事曆事件；單純傳照片（例如吃飯照）不會自動建立行程。
+PENDING_IMAGE_TTL_SECONDS = 300  # 5 分鐘
+CALENDAR_TRIGGER_KEYWORDS = (
+    "行事曆",
+    "建立行程",
+    "加行程",
+    "排行程",
+    "加到行程",
+    "排進行事曆",
+)
+
+
+def _is_calendar_trigger(text: str) -> bool:
+    return any(kw in text for kw in CALENDAR_TRIGGER_KEYWORDS)
 
 scheduler = AsyncIOScheduler(timezone=TAIPEI_TZ)
 
@@ -1072,6 +1093,12 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
         except Exception as _e:
             print(f"[DoubleA] _respond push 最終失敗：{_e}")
 
+    # 圖片＋文字說明才觸發行事曆：
+    # 剛剛有傳照片、且這則文字包含觸發語 → 用那張照片建立行程，其餘文字判斷都跳過。
+    if _is_calendar_trigger(text) and load_pending_image(chat_id):
+        process_image_as_calendar(chat_id, reply_token)
+        return
+
     if handle_command(text, chat_id, reply_token):
         return
 
@@ -1304,9 +1331,17 @@ def _download_line_content(message_id: str) -> tuple[bytes, str]:
 
 
 def process_image(message_id: str, chat_id: str, reply_token: str | None = None) -> None:
+    """背景任務：收到圖片。
+
+    預設「不會」自動判斷成行事曆事件 —— 只做收據辨識／記帳照片提醒。
+    要用這張照片建立行程，必須在 PENDING_IMAGE_TTL_SECONDS 秒內
+    接著輸入觸發語（例如「加到行事曆」），由 process_image_as_calendar 處理。
+    這樣可避免每次上傳吃飯照片都被誤判自動建立行程。
+    """
     print(f"[DoubleA] process_image 開始：message_id={message_id} chat_id={chat_id}")
     save_chat_id(chat_id)
-    now = datetime.now(TAIPEI_TZ)
+    save_pending_image(chat_id, message_id)
+
     _used_reply: list[bool] = [False]
 
     def _respond(msg: str) -> None:
@@ -1323,7 +1358,78 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
             print(f"[DoubleA] image push 最終失敗：{_e}")
 
     try:
-        _push_line(chat_id, "⏳ 圖片收到，正在分析中...")
+        image_bytes, mime_type = _download_line_content(message_id)
+    except Exception as e:
+        _respond("⚠️ 圖片下載失敗，請稍後再試。")
+        return
+
+    # 只嘗試辨識收據／記帳提醒，不主動判斷行事曆
+    try:
+        receipt = parse_receipt_image(image_bytes, mime_type)
+        if "error" not in receipt and receipt.get("total", 0) > 0:
+            # 成功辨識收據 → 找最近的專案記入
+            last = get_last_expense_any(chat_id)
+            if last:
+                expense, doc_id = last
+                project_name = expense.get("project", "")
+                add_receipt_expense(receipt, project_name)
+                _respond(format_receipt_result(receipt, project_name))
+            else:
+                store = receipt.get('store', '不明')
+                total = receipt.get('total', 0)
+                _respond(
+                    f"🧾 偵測到收據！\n\n"
+                    f"🏪 {store}\n"
+                    f"💰 合計：${total:,.0f}\n\n"
+                    "⚠️ 請先建立專案再傳收據\n"
+                    "例：+專案 日本旅行 6/30-7/4"
+                )
+        else:
+            # 不是收據 → 提醒存相簿（若有進行中的記帳專案）
+            last = get_last_expense_any(chat_id)
+            if last:
+                expense, doc_id = last
+                mark_photo_noted(doc_id)
+                project_name = expense.get("project", "")
+                _respond(format_photo_reminder(expense, project_name))
+    except Exception as e:
+        print(f"[DoubleA] 圖片處理失敗：{e}")
+
+
+def process_image_as_calendar(chat_id: str, reply_token: str | None = None) -> None:
+    """使用者傳完照片後接著輸入「加到行事曆」等觸發語 → 才真正解析圖片並建立行程。"""
+    print(f"[DoubleA] process_image_as_calendar 開始：chat_id={chat_id}")
+    now = datetime.now(TAIPEI_TZ)
+    _used_reply: list[bool] = [False]
+
+    def _respond(msg: str) -> None:
+        if reply_token and not _used_reply[0]:
+            try:
+                _reply_line(reply_token, msg)
+                _used_reply[0] = True
+                return
+            except Exception as _e:
+                print(f"[DoubleA] calendar-from-image reply 失敗，改用 push：{_e}")
+        try:
+            _push_line(chat_id, msg)
+        except Exception as _e:
+            print(f"[DoubleA] calendar-from-image push 最終失敗：{_e}")
+
+    pending = load_pending_image(chat_id)
+    if not pending:
+        _respond("⚠️ 沒有找到最近的照片，請先傳照片，再輸入「加到行事曆」。")
+        return
+
+    ts = pending.get("ts", 0)
+    if time.time() - ts > PENDING_IMAGE_TTL_SECONDS:
+        clear_pending_image(chat_id)
+        _respond("⚠️ 照片已超過時效，請重新傳一次照片，再輸入「加到行事曆」。")
+        return
+
+    message_id = pending["message_id"]
+
+    try:
+        _push_line(chat_id, "⏳ 正在從照片分析行程...")
     except Exception as e:
         print(f"[DoubleA] 分析中通知失敗：{e}")
 
@@ -1340,42 +1446,15 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
         return
 
     if result.get("type") != "calendar":
-        # 圖片不是行程 → 嘗試辨識為收據
-        try:
-            receipt = parse_receipt_image(image_bytes, mime_type)
-            if "error" not in receipt and receipt.get("total", 0) > 0:
-                # 成功辨識收據 → 找最近的專案記入
-                last = get_last_expense_any(chat_id)
-                if last:
-                    expense, doc_id = last
-                    project_name = expense.get("project", "")
-                    add_receipt_expense(receipt, project_name)
-                    _respond(format_receipt_result(receipt, project_name))
-                else:
-                    store = receipt.get('store', '不明')
-                    total = receipt.get('total', 0)
-                    _respond(
-                        f"🧾 偵測到收據！\n\n"
-                        f"🏪 {store}\n"
-                        f"💰 合計：${total:,.0f}\n\n"
-                        "⚠️ 請先建立專案再傳收據\n"
-                        "例：+專案 日本旅行 6/30-7/4"
-                    )
-            else:
-                # 不是收據也不是行程 → 提醒存相簿
-                last = get_last_expense_any(chat_id)
-                if last:
-                    expense, doc_id = last
-                    mark_photo_noted(doc_id)
-                    project_name = expense.get("project", "")
-                    _respond(format_photo_reminder(expense, project_name))
-        except Exception as e:
-            print(f"[DoubleA] 圖片處理失敗：{e}")
+        _respond("⚠️ 沒有從這張照片偵測到可建立的行程內容。")
         return
 
     events = result.get("events") or []
     if not events:
+        _respond("⚠️ 沒有從這張照片偵測到可建立的行程內容。")
         return
+
+    clear_pending_image(chat_id)
 
     if len(events) == 1:
         ev = events[0]
@@ -1385,7 +1464,7 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
             save_last_event(created["id"], ev)
             schedule_event_reminder(chat_id, ev)
             reply = _format_calendar_confirmation(ev, created["link"])
-            reply += f"\n\n📸 已從圖片自動偵測並建立！"
+            reply += f"\n\n📸 已從照片建立！"
         except Exception as e:
             _respond("⚠️ 偵測到行程但建立失敗，請稍後再試。")
             return
@@ -1403,10 +1482,12 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
                 failed.append(ev.get("title", "未知"))
         if succeeded:
             reply = _format_multi_calendar_confirmation(succeeded)
-            reply += "\n\n📸 已從圖片自動偵測並建立！"
+            reply += "\n\n📸 已從照片建立！"
             if failed:
                 reply += f"\n\n⚠️ 以下建立失敗：{'、'.join(failed)}"
             _respond(reply)
+        elif failed:
+            _respond("⚠️ 偵測到行程但建立失敗，請稍後再試。")
 
 
 # ── Location（記帳 GPS 附加）────────────────────────────────────────────────────

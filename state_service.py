@@ -5,6 +5,7 @@ State persistence:
 """
 import json
 import os
+import time
 from datetime import datetime
 
 USE_FIRESTORE = bool(os.environ.get("K_SERVICE") or os.environ.get("USE_FIRESTORE"))
@@ -166,3 +167,25 @@ def load_pending_edit(chat_id: str) -> dict | None:
 
 def clear_pending_edit(chat_id: str) -> None:
     save_state({f"pending_edit_{chat_id}": None})
+
+
+# ── Pending image state（圖片＋文字說明才建立行事曆）────────────────────────────
+# 使用者傳照片後，若沒有接著輸入觸發語（例如「加到行事曆」），
+# 這張照片就只會走收據辨識／記帳提醒，不會自動建立行程。
+
+def save_pending_image(chat_id: str, message_id: str) -> None:
+    save_state({
+        f"pending_image_{chat_id}": {
+            "message_id": message_id,
+            "ts": time.time(),
+        }
+    })
+
+
+def load_pending_image(chat_id: str) -> dict | None:
+    val = load_state().get(f"pending_image_{chat_id}")
+    return val if isinstance(val, dict) else None
+
+
+def clear_pending_image(chat_id: str) -> None:
+    save_state({f"pending_image_{chat_id}": None})
