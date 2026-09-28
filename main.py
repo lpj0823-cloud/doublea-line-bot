@@ -983,6 +983,77 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             _respond(f"⚠️ 餐廳查詢失敗：{e}")
         return True
 
+    # 天氣查詢：純關鍵字判斷，不用 AI 分類。
+    # 「天氣」是完全規則型的意圖，讓 AI 猜只會多一次呼叫、多一個分類失誤點。
+    if "天氣" in text or text.strip().lower() == "weather":
+        try:
+            if any(k in text for k in ("這週", "本週", "一週", "未來", "這禮拜", "本禮拜")):
+                forecasts = get_daily_forecast(5)
+                reply = _format_weather_week(forecasts)
+            elif any(k in text for k in ("明天", "後天")):
+                forecasts = get_daily_forecast(3)
+                target = next((f for f in forecasts if f["label"] in ("明天", "後天")), None)
+                reply = _format_weather_single(target) if target else "⚠️ 無法取得近日天氣資料"
+            else:
+                current = get_current_weather()
+                forecasts = get_daily_forecast(1)
+                reply = _format_weather_today(current, forecasts[0]) if forecasts else (
+                    f"{current['emoji']} 台北現在 {current['temp']}°C，{current['description']}"
+                )
+        except Exception as e:
+            reply = "⚠️ 天氣查詢失敗，請稍後再試。"
+        _respond(reply)
+        return True
+
+    # 行事曆查詢（今天/明天/這週…行程）：常見詞先用程式算日期範圍，不用 AI。
+    # 只在確定是「查詢」而不是「新增／修改／刪除」時才接手，其餘交給 AI 判斷。
+    _CALENDAR_CREATE_VERBS = ("加到", "加入", "新增", "建立", "排入", "排進", "排到")
+    _CALENDAR_EDIT_VERBS = ("刪除", "取消", "修改")
+    if (
+        ("行程" in text or "行事曆" in text)
+        and not any(v in text for v in _CALENDAR_CREATE_VERBS)
+        and not any(v in text for v in _CALENDAR_EDIT_VERBS)
+    ):
+        now = datetime.now(TAIPEI_TZ)
+        today = now.date()
+        start_d = end_d = label = None
+        if "今天" in text:
+            start_d = end_d = today
+            label = "今天"
+        elif "明天" in text:
+            start_d = end_d = today + timedelta(days=1)
+            label = "明天"
+        elif "後天" in text:
+            start_d = end_d = today + timedelta(days=2)
+            label = "後天"
+        elif any(k in text for k in ("這週", "本週", "這禮拜", "本禮拜")):
+            start_d = today
+            end_d = today + timedelta(days=(7 - today.isoweekday()) % 7)
+            label = "這週"
+        elif any(k in text for k in ("下週", "下星期", "下禮拜")):
+            start_d = today + timedelta(days=(7 - today.isoweekday()) % 7 + 1)
+            end_d = start_d + timedelta(days=6)
+            label = "下週"
+        elif any(k in text for k in ("本月", "這個月")):
+            start_d = today
+            if today.month == 12:
+                end_d = today.replace(year=today.year + 1, month=1, day=1) - timedelta(days=1)
+            else:
+                end_d = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
+            label = "本月"
+
+        if label:
+            try:
+                start_dt = datetime(start_d.year, start_d.month, start_d.day)
+                end_dt = datetime(end_d.year, end_d.month, end_d.day)
+                is_range = start_d != end_d
+                events = list_events_for_range(start_dt, end_dt) if is_range else list_events_for_date(start_dt)
+                reply = _format_calendar_query_result(label, events, is_range)
+            except Exception as e:
+                reply = "⚠️ 查詢行事曆失敗，請稍後再試。"
+            _respond(reply)
+            return True
+
     return False
 
 
