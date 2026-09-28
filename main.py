@@ -1637,15 +1637,14 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             if not text:
                 continue
             if source_type in ("group", "room"):
-                if BOT_MENTION.lower() not in text.lower():
-                    # 診斷用：群組訊息沒比對到標籤時，印出原始文字方便排查
-                    # （例如手動打字的 @ 跟 LINE「選取聯絡人」產生的標籤格式不同）。
-                    print(
-                        f"[DoubleA] 群組訊息未含標籤，略過：raw_text={text!r} "
-                        f"BOT_MENTION={BOT_MENTION!r}"
-                    )
-                    continue
-                text = re.sub(re.escape(BOT_MENTION), "", text, flags=re.IGNORECASE).strip()
+                # 原本要求群組訊息必須包含 @培正家AI小幫手 標籤才處理，
+                # 但實測發現用 LINE「回覆訊息」功能帶出來的 @標籤只是畫面上的引用
+                # 顯示，並不會真的包進 webhook 收到的文字內容，導致訊息永遠被略過。
+                # 家人用習慣是直接回覆或直接說話，因此改為群組訊息一律處理；
+                # 若訊息剛好還是包含手打的標籤文字，先把它拿掉再往下走，
+                # 避免標籤文字干擾 AI 判斷或關鍵字比對。
+                if BOT_MENTION.lower() in text.lower():
+                    text = re.sub(re.escape(BOT_MENTION), "", text, flags=re.IGNORECASE).strip()
                 if not text:
                     continue
             background_tasks.add_task(process_message, text, chat_id, reply_token)
