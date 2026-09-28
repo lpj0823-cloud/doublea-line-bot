@@ -1442,12 +1442,14 @@ def process_image_as_calendar(
     try:
         image_bytes, mime_type = _download_line_content(message_id)
     except Exception as e:
+        print(f"[DoubleA] process_image_as_calendar 圖片下載失敗：{e!r}")
         _respond("⚠️ 圖片下載失敗，請稍後再試。")
         return
 
     try:
         result = parse_image_for_event(image_bytes, mime_type, now, text_hint=trigger_text)
     except Exception as e:
+        print(f"[DoubleA] process_image_as_calendar 圖片分析失敗：{e!r}")
         _respond("⚠️ 圖片分析失敗，請稍後再試。")
         return
 
