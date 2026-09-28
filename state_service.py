@@ -10,6 +10,12 @@ from datetime import datetime
 
 USE_FIRESTORE = bool(os.environ.get("K_SERVICE") or os.environ.get("USE_FIRESTORE"))
 
+# 診斷用：開機時印出判斷依據，方便確認 Railway 上的環境變數是否真的被移除了。
+print(
+    f"[DoubleA] state_service 啟動判斷：K_SERVICE={os.environ.get('K_SERVICE')!r} "
+    f"USE_FIRESTORE(env)={os.environ.get('USE_FIRESTORE')!r} → USE_FIRESTORE(flag)={USE_FIRESTORE}"
+)
+
 CHAT_STATE_FILE = os.path.join(os.path.dirname(__file__), "chat_state.json")
 FIRESTORE_COLLECTION = "doublea"
 FIRESTORE_STATE_DOC = "state"
@@ -28,7 +34,11 @@ def _fs_load_state() -> dict:
         doc = _get_db().collection(FIRESTORE_COLLECTION).document(FIRESTORE_STATE_DOC).get()
         return doc.to_dict() or {}
     except Exception as e:
-        print(f"[DoubleA] Firestore load_state 失敗，fallback JSON：{e}")
+        print(
+            f"[DoubleA] Firestore load_state 失敗（USE_FIRESTORE(flag)={USE_FIRESTORE}, "
+            f"env USE_FIRESTORE={os.environ.get('USE_FIRESTORE')!r}, K_SERVICE={os.environ.get('K_SERVICE')!r}），"
+            f"fallback JSON：{e}"
+        )
         return _local_load_state()
 
 
@@ -38,7 +48,11 @@ def _fs_save_state(data: dict) -> None:
             data, merge=True
         )
     except Exception as e:
-        print(f"[DoubleA] Firestore save_state 失敗，fallback JSON：{e}")
+        print(
+            f"[DoubleA] Firestore save_state 失敗（USE_FIRESTORE(flag)={USE_FIRESTORE}, "
+            f"env USE_FIRESTORE={os.environ.get('USE_FIRESTORE')!r}, K_SERVICE={os.environ.get('K_SERVICE')!r}），"
+            f"fallback JSON：{e}"
+        )
         _local_save_state(data)
 
 

@@ -671,7 +671,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             _respond("⚠️ 箴言暫時無法取得，請稍後再試。")
         return True
 
-    if text.strip() in ("待辦清單", "待辦", "todo", "TODO"):
+    if text.strip() in ("待辦清單", "待辦", "todo", "TODO", "代辦事項", "代辦", "代辦清單"):
         try:
             tasks = get_pending_tasks()
             _respond(_format_todo_list(tasks))
