@@ -1,8 +1,13 @@
+import json
 import os
+import uuid
 from datetime import datetime
 import pytz
 
+from state_service import USE_FIRESTORE
+
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
+FINANCE_FILE = os.path.join(os.path.dirname(__file__), "finance_data.json")
 
 
 def _get_db():
@@ -11,18 +16,30 @@ def _get_db():
     # 原本改用 firebase_admin + credentials.Certificate(GOOGLE_TOKEN_JSON) 是錯的：
     #   1) firebase_admin 未列在 requirements.txt；
     #   2) GOOGLE_TOKEN_JSON 是使用者 OAuth token，不是服務帳號金鑰。
-    try:
-        from google.cloud import firestore
-        return firestore.Client()
-    except Exception as e:
-        print(f"[Finance] Firestore 初始化失敗：{e}")
-        raise
+    from google.cloud import firestore
+    return firestore.Client()
+
+
+# ── 本機 JSON 備援（比照 state_service.py 的模式）───────────────────────────────
+# USE_FIRESTORE=False（本機開發，或 Railway 沒設定服務帳號金鑰）時直接用這個；
+# USE_FIRESTORE=True 但 Firestore 連線失敗時，也會自動 fallback 到這裡，
+# 不會像之前一樣直接整個 raise 讓記帳功能掛掉。
+
+def _local_load() -> dict:
+    if os.path.exists(FINANCE_FILE):
+        with open(FINANCE_FILE) as f:
+            return json.load(f)
+    return {"projects": {}, "expenses": {}}
+
+
+def _local_save(data: dict) -> None:
+    with open(FINANCE_FILE, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # ── 專案管理 ──────────────────────────────────────────────────────────────────
 
 def create_project(name: str, description: str = "") -> dict:
-    db = _get_db()
     now = datetime.now(TAIPEI_TZ)
     project = {
         "name": name,
@@ -30,30 +47,59 @@ def create_project(name: str, description: str = "") -> dict:
         "created_at": now.strftime("%Y-%m-%d %H:%M"),
         "total": 0,
     }
-    db.collection("finance_projects").document(name).set(project)
+    if USE_FIRESTORE:
+        try:
+            _get_db().collection("finance_projects").document(name).set(project)
+            return project
+        except Exception as e:
+            print(f"[Finance] Firestore create_project 失敗，fallback 本機：{e}")
+    data = _local_load()
+    data["projects"][name] = project
+    _local_save(data)
     return project
 
 
 def get_project(name: str) -> dict | None:
-    db = _get_db()
-    doc = db.collection("finance_projects").document(name).get()
-    return doc.to_dict() if doc.exists else None
+    if USE_FIRESTORE:
+        try:
+            doc = _get_db().collection("finance_projects").document(name).get()
+            return doc.to_dict() if doc.exists else None
+        except Exception as e:
+            print(f"[Finance] Firestore get_project 失敗，fallback 本機：{e}")
+    return _local_load()["projects"].get(name)
 
 
 def list_projects() -> list[dict]:
-    db = _get_db()
-    docs = db.collection("finance_projects").order_by(
-        "created_at", direction="DESCENDING"
-    ).stream()
-    return [doc.to_dict() | {"id": doc.id} for doc in docs]
+    if USE_FIRESTORE:
+        try:
+            docs = _get_db().collection("finance_projects").order_by(
+                "created_at", direction="DESCENDING"
+            ).stream()
+            return [doc.to_dict() | {"id": doc.id} for doc in docs]
+        except Exception as e:
+            print(f"[Finance] Firestore list_projects 失敗，fallback 本機：{e}")
+    projects = list(_local_load()["projects"].values())
+    projects.sort(key=lambda p: p.get("created_at", ""), reverse=True)
+    return [p | {"id": p["name"]} for p in projects]
 
 
 def delete_project(name: str) -> bool:
-    db = _get_db()
-    expenses = db.collection("finance_expenses").where("project", "==", name).stream()
-    for exp in expenses:
-        exp.reference.delete()
-    db.collection("finance_projects").document(name).delete()
+    if USE_FIRESTORE:
+        try:
+            db = _get_db()
+            expenses = db.collection("finance_expenses").where("project", "==", name).stream()
+            for exp in expenses:
+                exp.reference.delete()
+            db.collection("finance_projects").document(name).delete()
+            return True
+        except Exception as e:
+            print(f"[Finance] Firestore delete_project 失敗，fallback 本機：{e}")
+    data = _local_load()
+    data["expenses"] = {
+        eid: e for eid, e in data["expenses"].items() if e.get("project") != name
+    }
+    data["projects"].pop(name, None)
+    _local_save(data)
     return True
 
 
@@ -114,7 +160,6 @@ def parse_expense_input(raw: str) -> dict | None:
 
 def add_expense(parsed: dict) -> tuple[dict, str]:
     """新增花費記錄，回傳 (expense_data, doc_id)。"""
-    db = _get_db()
     project_name = parsed["project"]
 
     project = get_project(project_name)
@@ -135,71 +180,127 @@ def add_expense(parsed: dict) -> tuple[dict, str]:
         "photo_noted": False,
         "gps_location": None,
     }
-
-    _, doc_ref = db.collection("finance_expenses").add(expense)
     new_total = project.get("total", 0) + parsed["total"]
-    db.collection("finance_projects").document(project_name).update({"total": new_total})
 
-    return expense, doc_ref.id
+    if USE_FIRESTORE:
+        try:
+            db = _get_db()
+            _, doc_ref = db.collection("finance_expenses").add(expense)
+            db.collection("finance_projects").document(project_name).update({"total": new_total})
+            return expense, doc_ref.id
+        except Exception as e:
+            print(f"[Finance] Firestore add_expense 失敗，fallback 本機：{e}")
+
+    data = _local_load()
+    doc_id = uuid.uuid4().hex
+    data["expenses"][doc_id] = expense
+    if project_name in data["projects"]:
+        data["projects"][project_name]["total"] = new_total
+    else:
+        # 專案本來存在 Firestore、現在才 fallback 到本機：把它也補進本機檔案，
+        # 這樣總額才對得起來。
+        data["projects"][project_name] = project | {"total": new_total}
+    _local_save(data)
+    return expense, doc_id
 
 
 def get_expenses(project_name: str) -> list[dict]:
-    db = _get_db()
-    docs = (
-        db.collection("finance_expenses")
-        .where("project", "==", project_name)
-        .order_by("created_at")
-        .stream()
-    )
-    return [doc.to_dict() | {"id": doc.id} for doc in docs]
+    if USE_FIRESTORE:
+        try:
+            docs = (
+                _get_db()
+                .collection("finance_expenses")
+                .where("project", "==", project_name)
+                .order_by("created_at")
+                .stream()
+            )
+            return [doc.to_dict() | {"id": doc.id} for doc in docs]
+        except Exception as e:
+            print(f"[Finance] Firestore get_expenses 失敗，fallback 本機：{e}")
+    expenses = [
+        e | {"id": eid}
+        for eid, e in _local_load()["expenses"].items()
+        if e.get("project") == project_name
+    ]
+    expenses.sort(key=lambda e: e.get("created_at", ""))
+    return expenses
 
 
 def get_latest_expense(project_name: str) -> tuple[dict, str] | None:
     """取得專案最新一筆花費，回傳 (expense_data, doc_id)。"""
-    db = _get_db()
-    docs = list(
-        db.collection("finance_expenses")
-        .where("project", "==", project_name)
-        .order_by("created_at", direction="DESCENDING")
-        .limit(1)
-        .stream()
-    )
-    if not docs:
+    if USE_FIRESTORE:
+        try:
+            docs = list(
+                _get_db()
+                .collection("finance_expenses")
+                .where("project", "==", project_name)
+                .order_by("created_at", direction="DESCENDING")
+                .limit(1)
+                .stream()
+            )
+            if not docs:
+                return None
+            return docs[0].to_dict(), docs[0].id
+        except Exception as e:
+            print(f"[Finance] Firestore get_latest_expense 失敗，fallback 本機：{e}")
+    expenses = get_expenses(project_name)
+    if not expenses:
         return None
-    return docs[0].to_dict(), docs[0].id
+    latest = expenses[-1]
+    return latest, latest["id"]
 
 
 def get_last_expense_any(chat_id: str) -> tuple[dict, str] | None:
     """取得任意專案最新一筆花費（用於位置附加）。"""
-    db = _get_db()
-    docs = list(
-        db.collection("finance_expenses")
-        .order_by("created_at", direction="DESCENDING")
-        .limit(1)
-        .stream()
-    )
-    if not docs:
+    if USE_FIRESTORE:
+        try:
+            docs = list(
+                _get_db()
+                .collection("finance_expenses")
+                .order_by("created_at", direction="DESCENDING")
+                .limit(1)
+                .stream()
+            )
+            if not docs:
+                return None
+            return docs[0].to_dict(), docs[0].id
+        except Exception as e:
+            print(f"[Finance] Firestore get_last_expense_any 失敗，fallback 本機：{e}")
+    expenses = [e | {"id": eid} for eid, e in _local_load()["expenses"].items()]
+    if not expenses:
         return None
-    return docs[0].to_dict(), docs[0].id
+    expenses.sort(key=lambda e: e.get("created_at", ""))
+    latest = expenses[-1]
+    return latest, latest["id"]
 
 
 def attach_location(doc_id: str, title: str, lat: float, lon: float, address: str) -> None:
     """將 GPS 位置附加到指定花費記錄。"""
-    db = _get_db()
-    db.collection("finance_expenses").document(doc_id).update({
-        "gps_location": {
-            "title": title,
-            "lat": lat,
-            "lon": lon,
-            "address": address,
-        }
-    })
+    gps = {"title": title, "lat": lat, "lon": lon, "address": address}
+    if USE_FIRESTORE:
+        try:
+            _get_db().collection("finance_expenses").document(doc_id).update({"gps_location": gps})
+            return
+        except Exception as e:
+            print(f"[Finance] Firestore attach_location 失敗，fallback 本機：{e}")
+    data = _local_load()
+    if doc_id in data["expenses"]:
+        data["expenses"][doc_id]["gps_location"] = gps
+        _local_save(data)
 
 
 def mark_photo_noted(doc_id: str) -> None:
     """標記該筆花費已提醒存圖。"""
-    db = _get_db()
-    db.collection("finance_expenses").document(doc_id).update({"photo_noted": True})
+    if USE_FIRESTORE:
+        try:
+            _get_db().collection("finance_expenses").document(doc_id).update({"photo_noted": True})
+            return
+        except Exception as e:
+            print(f"[Finance] Firestore mark_photo_noted 失敗，fallback 本機：{e}")
+    data = _local_load()
+    if doc_id in data["expenses"]:
+        data["expenses"][doc_id]["photo_noted"] = True
+        _local_save(data)
 
 
 # ── 統計 ──────────────────────────────────────────────────────────────────────

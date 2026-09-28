@@ -2,6 +2,7 @@
 credentials.json
 token.json
 chat_state.json
+finance_data.json
 __pycache__/
 *.pyc
 .DS_Store
