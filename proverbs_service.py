@@ -109,3 +109,37 @@ def get_proverbs_header(now: datetime = None) -> str:
     date_str = now.strftime("%-m月%-d日")
 
     return f"🕊️ {date_str} 每日箴言 — 第 {chapter} 章"
+
+
+def get_daily_verses(now: datetime = None, count: int = 3) -> tuple[str, str]:
+    """精選版：當天章節中，依日期輪流挑連續 count 節（中英同節），適合「平安」與每日推播。
+    回傳 (中文, 英文)。整章請用 get_todays_proverbs。"""
+    if now is None:
+        now = datetime.now(TAIPEI_TZ)
+    day = now.day
+    chapter = ((day - 1) % 31) + 1
+
+    ok_zh, zh_recs = _fetch_fhl_chapter(chapter, ZH_VERSION)
+    ok_en, en_recs = _fetch_fhl_chapter(chapter, EN_VERSION)
+    if not ok_zh or not zh_recs:
+        raise RuntimeError("箴言中文取得失敗")
+
+    n = len(zh_recs)
+    start = ((day - 1) * count) % max(n - count + 1, 1)
+    picked = zh_recs[start:start + count]
+    secs = [str(r.get("sec", "")) for r in picked]
+    first, last = secs[0], secs[-1]
+    rng = first if first == last else f"{first}-{last}"
+
+    zh_lines = [f"📖 箴言 {chapter}:{rng}（和合本）"]
+    zh_lines += [f"{r.get('sec')} {r.get('bible_text', '').strip()}" for r in picked]
+    zh = "\n".join(zh_lines)
+
+    if ok_en and en_recs:
+        by_sec = {str(r.get("sec")): r.get("bible_text", "").strip() for r in en_recs}
+        en_lines = [f"📖 Proverbs {chapter}:{rng} (WEB)"]
+        en_lines += [f"{s} {by_sec[s]}" for s in secs if by_sec.get(s)]
+        en = "\n".join(en_lines)
+    else:
+        en = f"📖 Proverbs {chapter}:{rng} (WEB) temporarily unavailable."
+    return zh, en

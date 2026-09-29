@@ -67,7 +67,7 @@ from shopping_service import (
     mark_done_by_keyword,
 )
 from notes_service import add_note, delete_note_by_index, get_notes
-from proverbs_service import get_todays_proverbs, get_proverbs_header
+from proverbs_service import get_todays_proverbs, get_proverbs_header, get_daily_verses
 from rate_limiter import check_rate_limit
 from birthday_service import (
     add_birthday,
@@ -444,12 +444,12 @@ def proverbs_job() -> None:
     now = datetime.now(TAIPEI_TZ)
     header = get_proverbs_header(now)
     try:
-        zh_text, en_text = get_todays_proverbs(now)
+        zh_text, en_text = get_daily_verses(now)
     except Exception as e:
         print(f"[DoubleA] 箴言排程：取得經文失敗 {e}")
         return
     try:
-        _send_texts(chat_id, [f"{header}\n\n{zh_text}", en_text])
+        _send_texts(chat_id, [f"🕊️ {now.strftime('%-m月%-d日')} 今日箴言\n\n{zh_text}\n\n{en_text}\n\n（傳「箴言」看整章）"])
         print("[DoubleA] 箴言發送成功")
     except Exception as e:
         print(f"[DoubleA] 箴言發送失敗：{e}")
@@ -701,8 +701,9 @@ def _menu_text() -> str:
         "💰 記帳：「+專案 日本旅行」；「+花費 日本旅行 午餐 850」；「專案清單」\n"
         "🍽️ 餐廳：「附近餐廳」或「附近 火鍋」\n"
         "🌦️ 天氣：「今天天氣」「明天天氣」「這週天氣」\n"
-        "📖 箴言：傳「箴言」\n\n"
-        "⏰ 自動提醒：每天早上 6:00 推「今天」的行程、晚上 18:00 推「明天」的行程。"
+        "📖 箴言：傳「箴言」看整章\n"
+        "🙏 平安：今日行程＋待辦＋精選箴言\n\n"
+        "⏰ 自動提醒：06:00 今天行程、07:00 生日、07:05 精選箴言、18:00 明天行程。"
     )
 
 
@@ -712,10 +713,9 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
     def _respond(msg: str) -> None:
         _send_line_msg(chat_id, TextMessage(text=msg), reply_token, _used)
 
-    # 「平安」= 今日行程 + 待辦 + 今日箴言（中英）+ 功能選單，全部用免費 reply 一次送出
-    if text.strip() in ("平安", "選單", "功能", "menu", "help", "?", "？"):
+    # 「平安」= 今日行程 + 待辦 + 今日精選箴言（中英各 3 節）；完整功能選單改傳「選單」
+    if text.strip() == "平安":
         _now = datetime.now(TAIPEI_TZ)
-        parts: list[str] = []
         head = f"🙏 平安！今天是 {_now.strftime('%-m月%-d日')}"
         try:
             evs = list_events_for_date(_now)
@@ -732,19 +732,22 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
         except Exception as e:
             print(f"[DoubleA] 平安：待辦取得失敗 {e}")
             head += "\n\n📋 待辦暫時無法取得"
-        parts.append(head)
+        parts = [head]
         try:
-            zh_text, en_text = get_todays_proverbs(_now)
-            parts.append(f"{get_proverbs_header(_now)}\n\n{zh_text}")
-            parts.append(en_text)
+            zh_v, en_v = get_daily_verses(_now)
+            parts.append(f"🕊️ 今日箴言\n\n{zh_v}\n\n{en_v}\n\n（傳「箴言」看整章、「選單」看全部功能）")
         except Exception as e:
             print(f"[DoubleA] 平安：箴言取得失敗 {e}")
             parts.append("📖 箴言暫時無法取得，可稍後傳「箴言」再試。")
-        parts.append(_menu_text())
         try:
             _send_texts(chat_id, parts, reply_token, _used)
         except Exception as e:
             print(f"[DoubleA] 平安：送出失敗 {e}")
+        return True
+
+    # 「選單」= 功能選單
+    if text.strip() in ("選單", "功能", "menu", "help", "?", "？"):
+        _respond(_menu_text())
         return True
 
     # 「群組ID」= 回覆目前聊天室的 ID，用來設定 Railway 的 PUSH_CHAT_ID
