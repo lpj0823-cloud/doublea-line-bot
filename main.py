@@ -747,6 +747,11 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             print(f"[DoubleA] 平安：送出失敗 {e}")
         return True
 
+    # 「群組ID」= 回覆目前聊天室的 ID，用來設定 Railway 的 PUSH_CHAT_ID
+    if text.strip() in ("群組ID", "群組id", "chatid"):
+        _respond(f"這個聊天室的 ID：\n{chat_id}\n\n把它填到 Railway 環境變數 PUSH_CHAT_ID，排程推播就會固定送到這裡。")
+        return True
+
     # 「箴言」= 即時回覆今日箴言（中、英分開送，避免超過 LINE 5000 字上限）
     if text.strip() in ("箴言", "每日箴言"):
         try:
