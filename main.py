@@ -707,6 +707,13 @@ def _menu_text() -> str:
     )
 
 
+def _loose_match(text: str, keyword: str, max_len: int = 8) -> bool:
+    """寬鬆比對：短訊息（去掉空白與標點後）只要含關鍵字就算，
+    例如「傳箴言」「箴言！」「傳「箴言」」「今日箴言」都會觸發；長訊息不會誤觸。"""
+    t = re.sub(r"[\s「」『』\"'“”!！?？。,，、~～]", "", text)
+    return keyword in t and len(t) <= max_len
+
+
 def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> bool:
     _used: list[bool] = [False]
 
@@ -714,7 +721,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
         _send_line_msg(chat_id, TextMessage(text=msg), reply_token, _used)
 
     # 「平安」= 今日行程 + 待辦 + 今日精選箴言（中英各 3 節）；完整功能選單改傳「選單」
-    if text.strip() == "平安":
+    if _loose_match(text, "平安", 5) and "平安夜" not in text:
         _now = datetime.now(TAIPEI_TZ)
         head = f"🙏 平安！今天是 {_now.strftime('%-m月%-d日')}"
         try:
@@ -756,7 +763,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
         return True
 
     # 「箴言」= 即時回覆今日箴言（中、英分開送，避免超過 LINE 5000 字上限）
-    if text.strip() in ("箴言", "每日箴言"):
+    if _loose_match(text, "箴言"):
         try:
             now = datetime.now(TAIPEI_TZ)
             zh_text, en_text = get_todays_proverbs(now)
