@@ -707,6 +707,72 @@ def _menu_text() -> str:
     )
 
 
+_FILLER_RE = re.compile(
+    r"(傳送|請問|給我|幫我|麻煩|看一下|看看|查詢|有哪些|有什麼|一下|我的|顯示|列出|所有|目前|現在|還有|哪些|傳|請|看|查|的)"
+)
+_PUNCT_RE = re.compile(r"[\s「」『』\"'“”!！?？。,，、~～:：]")
+
+# 純「查詢／動作」類指令的各種說法 → 標準指令
+_EXACT_ALIASES: dict[str, tuple[str, ...]] = {
+    "待辦": ("待辦", "待辦清單", "待辦事項", "待办", "代辦", "代辦清單", "代辦事項", "todo", "todolist", "任務", "任務清單"),
+    "購物清單": ("購物清單", "購物", "購物單", "購物列表", "採買清單", "要買的"),
+    "筆記": ("筆記", "筆記清單", "筆記列表", "記事本", "所有筆記"),
+    "生日清單": ("生日清單", "生日", "生日表", "生日列表", "生日提醒"),
+    "專案清單": ("專案清單", "專案", "專案列表", "記帳", "記帳清單", "花費清單"),
+    "清除已買": ("清除已買", "清除買完", "清掉已買", "清空已買", "清除已買的"),
+    "刪除行程": ("刪除行程", "刪行程", "取消行程", "移除行程"),
+    "修改行程": ("修改行程", "改行程", "編輯行程", "更改行程"),
+    "選單": ("選單", "功能", "功能表", "功能選單", "說明", "幫助", "help", "menu", "指令", "怎麼用", "?", "？"),
+    "群組ID": ("群組id", "chatid", "群組編號", "聊天室id", "群組代號"),
+}
+_ALIAS_LOOKUP = {a: canon for canon, alts in _EXACT_ALIASES.items() for a in alts}
+
+# 「指令 + 內容」類的各種說法 → 標準格式（(pattern, replacement, 是否為寬鬆比對)）
+_PREFIX_RULES: list[tuple[re.Pattern, str, bool]] = [
+    (re.compile(r"^(?:新增購物|加購物|加買|加入購物清單|購物)\s*[:：]?\s*(.+)$"), r"+買 \1", False),
+    (re.compile(r"^(?:記筆記|新增筆記|加筆記|筆記)\s*[:：]?\s*(.+)$"), r"+記 \1", False),
+    (re.compile(r"^(?:新增生日|加生日|記生日)\s*[:：]?\s*(.+)$"), r"+生日 \1", False),
+    (re.compile(r"^(?:新增專案|建立專案|加專案|開專案)\s*[:：]?\s*(.+)$"), r"+專案 \1", False),
+    (re.compile(r"^(?:新增花費|加花費|記花費|記一筆)\s*[:：]?\s*(.+)$"), r"+花費 \1", False),
+    (re.compile(r"^(?:刪除筆記|刪筆記|刪掉筆記)\s*(\d+)$"), r"刪筆記 \1", False),
+    (re.compile(r"^(?:刪除生日|刪生日|刪掉生日)\s*(\d+)$"), r"刪生日 \1", False),
+    (re.compile(r"^(?:刪除專案|刪專案|刪掉專案)\s*(.+)$"), r"刪專案 \1", False),
+    (re.compile(r"^(?:查專案|看專案|專案明細|專案內容)\s*(.+)$"), r"專案 \1", False),
+    (re.compile(r"^(?i:done|del|完成了?|已完成|做完了?|搞定了?)\s*(\d+)$"), r"del \1", False),
+    (re.compile(r"^(?i:done|完成了?|已完成|做完了?|搞定了?)\s*(.+)$"), r"完成 \1", True),
+    (re.compile(r"^(?:買到了?|買好了?|已買|買齊了?)\s*(.+)$"), r"買到 \1", True),
+]
+
+
+def _canonicalize(text: str) -> tuple[str, bool]:
+    """把各種說法轉成標準指令。回傳 (標準指令文字, 是否為『寬鬆比對』)。
+    寬鬆比對（例如「完成買菜」）找不到對應項目時，會放行給 AI，避免誤攔一般聊天。
+    不是指令就原樣回傳。"""
+    t = text.strip().replace("＋", "+").replace("\u3000", " ")
+    if not t:
+        return text, False
+    # 「+ 買 牛奶」→「+買 牛奶」
+    t = re.sub(r"^\+\s*(買|記|生日|專案|花費)", r"+\1", t)
+    if t.startswith("+"):
+        return t, False
+
+    clean = _FILLER_RE.sub("", _PUNCT_RE.sub("", t)).lower()
+    if clean in _ALIAS_LOOKUP and len(t) <= 14:
+        return _ALIAS_LOOKUP[clean], False
+
+    if len(t) <= 60:
+        for pat, repl, loose in _PREFIX_RULES:
+            m = pat.match(t)
+            if m:
+                return pat.sub(repl, t), loose
+
+    # 附近餐廳／附近火鍋／附近有什麼好吃的
+    if t.startswith("附近") and len(t) <= 14:
+        kw = re.sub(r"(有什麼|有沒有|好吃的|推薦|餐廳|的|店|找|查|附近|\s|[?？!！。])", "", t)
+        return ("附近餐廳" if not kw else f"附近 {kw}"), False
+    return text, False
+
+
 def _loose_match(text: str, keyword: str, max_len: int = 8) -> bool:
     """寬鬆比對：短訊息（去掉空白與標點後）只要含關鍵字就算，
     例如「傳箴言」「箴言！」「傳「箴言」」「今日箴言」都會觸發；長訊息不會誤觸。"""
@@ -716,6 +782,7 @@ def _loose_match(text: str, keyword: str, max_len: int = 8) -> bool:
 
 def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> bool:
     _used: list[bool] = [False]
+    text, _loose = _canonicalize(text)  # 放寬文字解讀：各種說法先轉成標準指令
 
     def _respond(msg: str) -> None:
         _send_line_msg(chat_id, TextMessage(text=msg), reply_token, _used)
@@ -753,12 +820,12 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
         return True
 
     # 「選單」= 功能選單
-    if text.strip() in ("選單", "功能", "menu", "help", "?", "？"):
+    if text.strip() == "選單":
         _respond(_menu_text())
         return True
 
     # 「群組ID」= 回覆目前聊天室的 ID，用來設定 Railway 的 PUSH_CHAT_ID
-    if text.strip() in ("群組ID", "群組id", "chatid"):
+    if text.strip() == "群組ID":
         _respond(f"這個聊天室的 ID：\n{chat_id}\n\n把它填到 Railway 環境變數 PUSH_CHAT_ID，排程推播就會固定送到這裡。")
         return True
 
@@ -776,7 +843,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
                 pass
         return True
 
-    if text.strip() in ("待辦清單", "待辦", "todo", "TODO", "代辦事項", "代辦", "代辦清單"):
+    if text.strip() == "待辦":
         try:
             tasks = get_pending_tasks()
             _respond(_format_todo_list(tasks))
@@ -788,6 +855,8 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
         keyword = text.split(" ", 1)[1].strip()
         try:
             title = complete_task_by_keyword(keyword)
+            if not title and _loose:
+                return False  # 寬鬆說法（如「完成買菜」）找不到待辦 → 交給 AI，不攔一般聊天
             if title:
                 msg = f"✅ 已完成：【{title}】\n\n{_cheer_complete()}"
             else:
@@ -907,6 +976,8 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             else:
                 name = mark_done_by_keyword(rest)
                 not_found_msg = f"❓ 找不到包含「{rest}」的品項"
+            if not name and _loose:
+                return False  # 寬鬆說法（如「買了新車」）找不到品項 → 交給 AI
             if not name:
                 _respond(not_found_msg)
             else:
