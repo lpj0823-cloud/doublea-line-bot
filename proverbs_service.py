@@ -1,3 +1,5 @@
+import time
+
 import requests
 from datetime import datetime
 import pytz
@@ -13,18 +15,29 @@ EN_VERSION = "web"   # World English Bible（NIV 為版權譯本，無免費 API
 
 def _fetch_fhl_chapter(chapter: int, version: str) -> tuple[bool, list[dict]]:
     """向信望愛站 API 抓取箴言指定章。回傳 (成功與否, record 陣列)。"""
-    r = requests.get(
-        FHL_API,
-        params={
-            "chineses": "箴",
-            "chap": chapter,
-            "gb": 0,          # 0 = 繁體（Big5）
-            "version": version,
-        },
-        timeout=15,
-    )
-    r.raise_for_status()
-    data = r.json()
+    last_err = None
+    data = None
+    for attempt in range(3):  # 網路偶發失敗時重試，最多 3 次
+        try:
+            r = requests.get(
+                FHL_API,
+                params={
+                    "chineses": "箴",
+                    "chap": chapter,
+                    "gb": 0,          # 0 = 繁體（Big5）
+                    "version": version,
+                },
+                timeout=15,
+            )
+            r.raise_for_status()
+            data = r.json()
+            break
+        except Exception as e:
+            last_err = e
+            print(f"[DoubleA] 箴言 API 第 {attempt + 1} 次失敗：{e}")
+            time.sleep(2)
+    if data is None:
+        raise last_err
     status = str(data.get("status", ""))
     if status != "success":
         # FHL 失敗時 status 會是 "Fail:..."，印出方便除錯

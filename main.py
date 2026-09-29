@@ -116,6 +116,12 @@ def _is_calendar_trigger(text: str) -> bool:
 scheduler = AsyncIOScheduler(timezone=TAIPEI_TZ)
 
 
+def _push_target() -> str | None:
+    """排程推播的目的地：優先用環境變數 PUSH_CHAT_ID（建議設成「培正家」群組 ID），
+    否則用最近一次記住的群組。"""
+    return os.environ.get("PUSH_CHAT_ID") or load_chat_id()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # 只保留兩則自動推播（節省 LINE 每月 push 額度）：
@@ -124,8 +130,13 @@ async def lifespan(_app: FastAPI):
     # 其餘功能（箴言、天氣、餐廳、待辦、購物、記帳…）一律改為「傳訊息才回覆」。
     scheduler.add_job(morning_calendar_job, CronTrigger(hour=6, minute=0, timezone=TAIPEI_TZ))
     scheduler.add_job(evening_calendar_job, CronTrigger(hour=18, minute=0, timezone=TAIPEI_TZ))
+    # 07:00 生日提醒（當天沒人生日就不推播、不耗額度）＋ 07:05 每日箴言。
+    # 若要再省 push 額度，把環境變數 ENABLE_PROVERB_PUSH 設成 false 即可關閉箴言推播。
+    scheduler.add_job(birthday_reminder_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
+    if os.environ.get("ENABLE_PROVERB_PUSH", "true").lower() != "false":
+        scheduler.add_job(proverbs_job, CronTrigger(hour=7, minute=5, timezone=TAIPEI_TZ))
     scheduler.start()
-    print("[DoubleA] 排程器已啟動：06:00 今日行事曆、18:00 明日行事曆")
+    print("[DoubleA] 排程器已啟動：06:00 今日行事曆、07:00 生日、07:05 箴言、18:00 明日行事曆")
     yield
     scheduler.shutdown()
     print("[DoubleA] 排程器已停止")
@@ -139,13 +150,15 @@ line_config = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 
 def _push_line(chat_id: str, text: str) -> None:
     try:
-        with ApiClient(line_config) as api_client:
-            MessagingApi(api_client).push_message(
-                PushMessageRequest(
-                    to=chat_id,
-                    messages=[TextMessage(text=text)],
+        chunks = _chunk_text(text)
+        for i in range(0, len(chunks), 5):
+            with ApiClient(line_config) as api_client:
+                MessagingApi(api_client).push_message(
+                    PushMessageRequest(
+                        to=chat_id,
+                        messages=[TextMessage(text=c) for c in chunks[i:i + 5]],
+                    )
                 )
-            )
     except Exception as e:
         print(f"[DoubleA] push_message 失敗：{e}")
         raise
@@ -180,6 +193,57 @@ def _send_line_msg(chat_id: str, msg_obj, reply_token: str | None, _used: list[b
             print(f"[DoubleA] reply_message 失敗，改用 push：{e}")
     with ApiClient(line_config) as api_client:
         MessagingApi(api_client).push_message(PushMessageRequest(to=chat_id, messages=[msg_obj]))
+
+
+LINE_TEXT_LIMIT = 4500  # LINE 單則文字上限 5000 字，保守取 4500
+
+
+def _chunk_text(text: str, limit: int = LINE_TEXT_LIMIT) -> list[str]:
+    """把長文字依換行切成多段，每段不超過 limit 字。"""
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        while len(line) > limit:  # 單行就超長（例如超長網址）→ 硬切
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if len(cur) + len(line) + 1 > limit and cur:
+            chunks.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+    return chunks or [""]
+
+
+def _send_texts(chat_id: str, texts: list[str], reply_token: str | None = None,
+                _used: list[bool] | None = None) -> None:
+    """一次送出多段文字：每段自動切在 5000 字以內；
+    reply_token 尚未用過時，前 5 則走免費 reply，其餘（或 reply 失敗時）走 push。"""
+    msgs: list[str] = []
+    for t in texts:
+        msgs.extend(_chunk_text(t))
+    rest = msgs
+    if reply_token and _used is not None and not _used[0]:
+        try:
+            with ApiClient(line_config) as api_client:
+                MessagingApi(api_client).reply_message(
+                    ReplyMessageRequest(
+                        reply_token=reply_token,
+                        messages=[TextMessage(text=m) for m in msgs[:5]],
+                    )
+                )
+            _used[0] = True
+            rest = msgs[5:]
+        except Exception as e:
+            print(f"[DoubleA] reply_message 失敗，改用 push：{e}")
+    for i in range(0, len(rest), 5):
+        with ApiClient(line_config) as api_client:
+            MessagingApi(api_client).push_message(
+                PushMessageRequest(to=chat_id, messages=[TextMessage(text=m) for m in rest[i:i + 5]])
+            )
 
 
 def _push_delete_picker(chat_id: str, events: list[dict], reply_token: str | None = None, _used: list[bool] | None = None) -> None:
@@ -290,7 +354,7 @@ def _push_birthday_list(chat_id: str, birthdays: list[dict], reply_token: str | 
 
 
 def birthday_reminder_job() -> None:
-    chat_id = load_chat_id()
+    chat_id = _push_target()
     if not chat_id:
         return
     now = datetime.now(TAIPEI_TZ)
@@ -324,7 +388,7 @@ def _format_day_events(events: list[dict]) -> str:
 
 def morning_calendar_job() -> None:
     """每日 06:00 排程：推播『今天』的行事曆。"""
-    chat_id = load_chat_id()
+    chat_id = _push_target()
     if not chat_id:
         print("[DoubleA] 早上6點排程：找不到 chat_id，略過")
         return
@@ -348,7 +412,7 @@ def morning_calendar_job() -> None:
 
 def evening_calendar_job() -> None:
     """每日 18:00 排程：推播『明天』的行事曆。"""
-    chat_id = load_chat_id()
+    chat_id = _push_target()
     if not chat_id:
         print("[DoubleA] 晚上6點排程：找不到 chat_id，略過")
         return
@@ -372,8 +436,8 @@ def evening_calendar_job() -> None:
 
 
 def proverbs_job() -> None:
-    """每日 07:05 排程：推播今日箴言（中文＋英文各一則）。"""
-    chat_id = load_chat_id()
+    """每日 07:05 排程：推播今日箴言（中文＋英文各一則，自動分段避免超過 5000 字）。"""
+    chat_id = _push_target()
     if not chat_id:
         print("[DoubleA] 箴言排程：找不到 chat_id，略過")
         return
@@ -385,10 +449,8 @@ def proverbs_job() -> None:
         print(f"[DoubleA] 箴言排程：取得經文失敗 {e}")
         return
     try:
-        _push_line(chat_id, f"🕊️ 今日箴言\n\n{header}")
-        _push_line(chat_id, zh_text)
-        _push_line(chat_id, en_text)
-        print(f"[DoubleA] 箴言發送成功")
+        _send_texts(chat_id, [f"{header}\n\n{zh_text}", en_text])
+        print("[DoubleA] 箴言發送成功")
     except Exception as e:
         print(f"[DoubleA] 箴言發送失敗：{e}")
 
@@ -489,7 +551,8 @@ def _generate_share_link(ev: dict) -> str:
     if ev.get("location"):
         params["location"] = ev["location"]
     if ev.get("description"):
-        params["details"] = ev["description"]
+        # 只放前 60 字：整段原文 URL 編碼後每個中文字變 9 字元，會讓確認訊息超過 LINE 5000 字上限
+        params["details"] = ev["description"][:60]
     return "https://calendar.google.com/calendar/render?" + urllib.parse.urlencode(params)
 
 
@@ -521,16 +584,10 @@ def _format_multi_calendar_confirmation(results: list[dict]) -> str:
         start_dt = datetime.fromisoformat(ev["start"])
         date_str = start_dt.strftime("%-m月%-d日 %H:%M")
         loc = ev.get("location")
-        location_line = f"\n   📍 {loc}" if (loc and loc != "null") else ""
-        share_link = _generate_share_link(ev)
-        lines.append(
-            f"{i}.【{ev['title']}】\n"
-            f"   🗓 {date_str}{location_line}\n"
-            f"   🔗 {r['link']}\n"
-            f"   📤 {share_link}"
-        )
+        loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
+        lines.append(f"{i}.【{ev['title']}】{date_str}{loc_part}")
     lines.append("\n✅ Ginny 已收到邀請\n⏰ 將於各活動開始前 2 小時提醒")
-    return "\n\n".join(lines)
+    return "\n".join(lines)
 
 
 def _format_todo_list(tasks: list) -> str:
@@ -655,20 +712,53 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
     def _respond(msg: str) -> None:
         _send_line_msg(chat_id, TextMessage(text=msg), reply_token, _used)
 
-    # 「平安」= 顯示功能選單
+    # 「平安」= 今日行程 + 待辦 + 今日箴言（中英）+ 功能選單，全部用免費 reply 一次送出
     if text.strip() in ("平安", "選單", "功能", "menu", "help", "?", "？"):
-        _respond(_menu_text())
+        _now = datetime.now(TAIPEI_TZ)
+        parts: list[str] = []
+        head = f"🙏 平安！今天是 {_now.strftime('%-m月%-d日')}"
+        try:
+            evs = list_events_for_date(_now)
+            head += "\n\n" + ("📅 今日行程\n" + _format_day_events(evs) if evs else "📅 今天沒有行程")
+        except Exception as e:
+            print(f"[DoubleA] 平安：行事曆取得失敗 {e}")
+            head += "\n\n📅 行事曆暫時無法取得"
+        try:
+            tasks = get_pending_tasks()
+            if tasks:
+                head += "\n\n📋 待辦\n" + "\n".join(f"{i}. {t['title']}" for i, t in enumerate(tasks, 1))
+            else:
+                head += "\n\n📋 目前沒有待辦事項 ✅"
+        except Exception as e:
+            print(f"[DoubleA] 平安：待辦取得失敗 {e}")
+            head += "\n\n📋 待辦暫時無法取得"
+        parts.append(head)
+        try:
+            zh_text, en_text = get_todays_proverbs(_now)
+            parts.append(f"{get_proverbs_header(_now)}\n\n{zh_text}")
+            parts.append(en_text)
+        except Exception as e:
+            print(f"[DoubleA] 平安：箴言取得失敗 {e}")
+            parts.append("📖 箴言暫時無法取得，可稍後傳「箴言」再試。")
+        parts.append(_menu_text())
+        try:
+            _send_texts(chat_id, parts, reply_token, _used)
+        except Exception as e:
+            print(f"[DoubleA] 平安：送出失敗 {e}")
         return True
 
-    # 「箴言」= 即時回覆今日箴言（改為傳訊息才回，不再自動推播）
+    # 「箴言」= 即時回覆今日箴言（中、英分開送，避免超過 LINE 5000 字上限）
     if text.strip() in ("箴言", "每日箴言"):
         try:
             now = datetime.now(TAIPEI_TZ)
-            header = get_proverbs_header(now)
             zh_text, en_text = get_todays_proverbs(now)
-            _respond(f"{header}\n\n{zh_text}\n\n{en_text}")
+            _send_texts(chat_id, [f"{get_proverbs_header(now)}\n\n{zh_text}", en_text], reply_token, _used)
         except Exception as e:
-            _respond("⚠️ 箴言暫時無法取得，請稍後再試。")
+            print(f"[DoubleA] 箴言指令失敗：{e}")
+            try:
+                _respond("⚠️ 箴言暫時無法取得，請稍後再試。")
+            except Exception:
+                pass
         return True
 
     if text.strip() in ("待辦清單", "待辦", "todo", "TODO", "代辦事項", "代辦", "代辦清單"):
@@ -1146,7 +1236,9 @@ def _should_notify(text: str) -> bool:
 
 def process_message(text: str, chat_id: str, reply_token: str | None = None) -> None:
     print(f"[DoubleA] 收到訊息：{text}")
-    save_chat_id(chat_id)
+    # 只記住群組/聊天室（C、R 開頭）；私訊（U 開頭）不覆蓋，避免排程推播被送到私訊
+    if chat_id[:1] in ('C', 'R') or not load_chat_id():
+        save_chat_id(chat_id)
     now = datetime.now(TAIPEI_TZ)
 
     _used_reply: list[bool] = [False]
@@ -1354,7 +1446,10 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
                     reply += f"\n\n⚠️ 以下事件建立失敗：{'、'.join(failed)}"
             else:
                 reply = "⚠️ 行事曆寫入失敗，請稍後再試。"
-            _respond(reply)
+            try:
+                _send_texts(chat_id, [reply], reply_token, _used_reply)
+            except Exception as _e:
+                print(f"[DoubleA] 多筆行程確認訊息送出失敗：{_e}")
 
     elif msg_type == "todo":
         try:
@@ -1410,7 +1505,8 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
     這樣可避免每次上傳吃飯照片都被誤判自動建立行程。
     """
     print(f"[DoubleA] process_image 開始：message_id={message_id} chat_id={chat_id}")
-    save_chat_id(chat_id)
+    if chat_id[:1] in ('C', 'R') or not load_chat_id():
+        save_chat_id(chat_id)
     save_pending_image(chat_id, message_id)
 
     _used_reply: list[bool] = [False]
@@ -1575,7 +1671,8 @@ def process_location(title: str, address: str, lat: float, lon: float,
                      chat_id: str, reply_token: str | None = None) -> None:
     """背景任務：使用者傳送位置 → 附加 GPS 到最近一筆花費記錄。"""
     print(f"[DoubleA] process_location：{title} ({lat},{lon}) chat_id={chat_id}")
-    save_chat_id(chat_id)
+    if chat_id[:1] in ('C', 'R') or not load_chat_id():
+        save_chat_id(chat_id)
 
     _used_reply: list[bool] = [False]
 
@@ -1739,6 +1836,17 @@ async def check_reminders():
         except Exception as e:
             print(f"[DoubleA] 提醒發送失敗：{e}")
     return JSONResponse(content={"status": "ok", "sent": len(due)})
+
+
+@app.get("/selftest")
+def selftest_endpoint(token: str = ""):
+    """自我檢查：需在環境變數設定 SELFTEST_TOKEN，並以 ?token= 帶入；未設定則停用。"""
+    expected = os.environ.get("SELFTEST_TOKEN", "")
+    if not expected or not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=404, detail="Not Found")
+    from selftest import run_selftest
+    results = run_selftest(scheduler)
+    return {"all_ok": all(r["ok"] for r in results), "results": results}
 
 
 @app.get("/health")

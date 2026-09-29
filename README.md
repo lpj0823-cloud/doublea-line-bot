@@ -251,6 +251,17 @@ gcloud run deploy doublea-bot --source . --region asia-east1 --project YOUR_PROJ
 
 ---
 
+## 2026-09-29 修正紀錄與自我檢查
+
+**修正內容**
+- 群組貼長通知（如科奧班 12 堂課）加進行事曆後沒回應：確認訊息內每個「分享連結」帶入整段原文，網址編碼後單則約 2,400 字，12 筆合計約 30,000 字，超過 LINE 單則 5,000 字上限，reply 與 push 都被 LINE 拒絕。行程其實已寫入。現改為：分享連結只帶前 60 字、多筆確認改成精簡條列，並新增 `_send_texts` 自動分段（每段 ≤4,500 字，一次 reply 最多 5 則，多的改 push）。
+- 每日箴言：`proverbs_job` 先前被排程移除（為了省 push 額度），已恢復 07:05 推播；中英文分段送出；API 失敗自動重試 3 次。可用 `ENABLE_PROVERB_PUSH=false` 關閉。
+- 生日提醒排程 07:00 恢復（當天沒人生日不推播、不耗額度）。
+- 「平安」：改為一次回覆「今日行程 + 待辦 + 今日箴言（中英）+ 功能選單」。
+- 排程推播目的地：私訊不再覆蓋群組 ID；也可用 `PUSH_CHAT_ID` 固定。
+
+**自我檢查**：Railway 設定 `SELFTEST_TOKEN` 後，開 `https://<網址>/selftest?token=<值>`；或在本機/Railway 執行 `python selftest.py`。
+
 ## 排除問題
 
 ### 行事曆寫入失敗
