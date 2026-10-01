@@ -1110,14 +1110,16 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
     if text.lower().startswith("del "):
         try:
             n = int(text.split(" ", 1)[1].strip())
+        except ValueError:
+            _respond("❓ 格式錯誤，請輸入「del 1」")
+            return True
+        try:
             title = complete_task_by_index(n)
             if title:
                 msg = f"✅ 已完成：【{title}】\n\n{_cheer_complete()}"
             else:
                 msg = f"❓ 找不到第 {n} 項待辦事項"
             _respond(msg)
-        except ValueError:
-            _respond("❓ 格式錯誤，請輸入「del 1」")
         except Exception as e:
             _respond(f"⚠️ 標記失敗：{e}")
         return True
@@ -1376,6 +1378,11 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
         name = text[len("刪專案 "):].strip()
         try:
             project = get_project(name)
+            if not project and name.isdigit():  # 「刪專案 1」：依「專案清單」的編號
+                _plist = list_projects()
+                if 1 <= int(name) <= len(_plist):
+                    name = _plist[int(name) - 1]["name"]
+                    project = get_project(name)
             if not project:
                 _respond(f"❓ 找不到專案「{name}」")
             else:
