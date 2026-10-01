@@ -753,7 +753,7 @@ def _generate_share_link(ev: dict) -> str:
 
 # ── Formatters ────────────────────────────────────────────────────────────────
 
-def _format_calendar_confirmation(event_data: dict, event_link: str) -> str:
+def _format_calendar_confirmation(event_data: dict, event_link: str, invited: bool = True) -> str:
     start_dt = datetime.fromisoformat(event_data["start"])
     date_str = start_dt.strftime("%-m月%-d日 %H:%M")
     loc = event_data.get("location")
@@ -765,13 +765,13 @@ def _format_calendar_confirmation(event_data: dict, event_link: str) -> str:
         f"【{event_data['title']}】\n"
         f"🗓 {date_str}{location_line}"
         f"{link_line}\n\n"
-        f"✅ Ginny 已收到邀請\n"
+        f"{'✅ Ginny 已收到邀請' if invited else '👤 僅記錄在你的行事曆（未邀請 Ginny）'}\n"
         f"{'⏰ 將於開始前 2 小時提醒' if _env_on('ENABLE_EVENT_REMINDER') else '⏰ 當天 07:00 早安摘要會提醒'}\n\n"
         f"📤 分享給其他人（點擊即可加入行事曆）\n{share_link}"
     )
 
 
-def _format_multi_calendar_confirmation(results: list[dict]) -> str:
+def _format_multi_calendar_confirmation(results: list[dict], invited: bool = True) -> str:
     count = len(results)
     lines = [f"📅 已加入 {count} 個行事曆！\n"]
     for i, r in enumerate(results, 1):
@@ -781,7 +781,7 @@ def _format_multi_calendar_confirmation(results: list[dict]) -> str:
         loc = ev.get("location")
         loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
         lines.append(f"{i}.【{ev['title']}】{date_str}{loc_part}")
-    lines.append("\n✅ Ginny 已收到邀請\n" + (
+    lines.append("\n" + ("✅ Ginny 已收到邀請" if invited else "👤 僅記錄在你的行事曆（未邀請 Ginny）") + "\n" + (
         "⏰ 將於各活動開始前 2 小時提醒" if _env_on("ENABLE_EVENT_REMINDER") else "⏰ 當天 07:00 早安摘要會提醒"))
     return "\n".join(lines)
 
@@ -1522,6 +1522,11 @@ def _cheer_todo() -> str:
 
 # ── Event time fixer ──────────────────────────────────────────────────────────
 
+def _invites_wife(chat_id: str) -> bool:
+    """群組／聊天室（C、R 開頭）建立的行程才邀請 Ginny；私訊（U 開頭）只寫自己的行事曆。"""
+    return chat_id.startswith(("C", "R"))
+
+
 def _fix_event_times(ev: dict) -> None:
     try:
         start_dt = datetime.fromisoformat(ev["start"])
@@ -1755,10 +1760,10 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
             ev["description"] = text
             _fix_event_times(ev)
             try:
-                created = create_calendar_event(ev)
+                created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
                 save_last_event(created["id"], ev)
                 schedule_event_reminder(chat_id, ev)
-                reply = _format_calendar_confirmation(ev, created["link"]) + f"\n\n{_cheer_calendar()}"
+                reply = _format_calendar_confirmation(ev, created["link"], _invites_wife(chat_id)) + f"\n\n{_cheer_calendar()}"
             except Exception as e:
                 reply = _gerr(e, "⚠️ 行事曆寫入失敗，請稍後再試。")
             _respond(reply)
@@ -1769,7 +1774,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
                 ev["description"] = text
                 _fix_event_times(ev)
                 try:
-                    created = create_calendar_event(ev)
+                    created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
                     save_last_event(created["id"], ev)
                     schedule_event_reminder(chat_id, ev)
                     succeeded.append({"event_data": ev, "link": created["link"]})
@@ -1777,7 +1782,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
                     failed.append(ev.get("title", "未知事件"))
                     _last_err = e
             if succeeded:
-                reply = _format_multi_calendar_confirmation(succeeded) + f"\n\n{_cheer_calendar()}"
+                reply = _format_multi_calendar_confirmation(succeeded, _invites_wife(chat_id)) + f"\n\n{_cheer_calendar()}"
                 if failed:
                     reply += f"\n\n⚠️ 以下事件建立失敗：{'、'.join(failed)}"
             else:
@@ -1968,10 +1973,10 @@ def process_image_as_calendar(
         ev = events[0]
         _fix_event_times(ev)
         try:
-            created = create_calendar_event(ev)
+            created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
             save_last_event(created["id"], ev)
             schedule_event_reminder(chat_id, ev)
-            reply = _format_calendar_confirmation(ev, created["link"])
+            reply = _format_calendar_confirmation(ev, created["link"], _invites_wife(chat_id))
             reply += f"\n\n📸 已從照片建立！"
         except Exception as e:
             _respond("⚠️ 偵測到行程但建立失敗，請稍後再試。")
@@ -1982,14 +1987,14 @@ def process_image_as_calendar(
         for ev in events:
             _fix_event_times(ev)
             try:
-                created = create_calendar_event(ev)
+                created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
                 save_last_event(created["id"], ev)
                 schedule_event_reminder(chat_id, ev)
                 succeeded.append({"event_data": ev, "link": created["link"]})
             except Exception as e:
                 failed.append(ev.get("title", "未知"))
         if succeeded:
-            reply = _format_multi_calendar_confirmation(succeeded)
+            reply = _format_multi_calendar_confirmation(succeeded, _invites_wife(chat_id))
             reply += "\n\n📸 已從照片建立！"
             if failed:
                 reply += f"\n\n⚠️ 以下建立失敗：{'、'.join(failed)}"

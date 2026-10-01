@@ -361,18 +361,19 @@ def find_and_update_event(
     }
 
 
-def create_calendar_event(event_data: dict) -> dict:
-    """Create a Google Calendar event and invite Ginny. Returns {"id": ..., "link": ...}"""
+def create_calendar_event(event_data: dict, invite_wife: bool = True) -> dict:
+    """Create a Google Calendar event; invite Ginny only when invite_wife. Returns {"id": ..., "link": ...}"""
     service = build("calendar", "v3", credentials=get_credentials())
 
     body: dict = {
         "summary": event_data["title"],
         "start": {"dateTime": event_data["start"], "timeZone": "Asia/Taipei"},
         "end": {"dateTime": event_data["end"], "timeZone": "Asia/Taipei"},
-        "attendees": [{"email": WIFE_EMAIL}],
-        "guestsCanModifyEvent": True,
         "reminders": {"useDefault": True},
     }
+    if invite_wife:
+        body["attendees"] = [{"email": WIFE_EMAIL}]
+        body["guestsCanModifyEvent"] = True
 
     if event_data.get("location"):
         body["location"] = event_data["location"]
