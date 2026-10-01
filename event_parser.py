@@ -46,8 +46,10 @@ def parse_message(message: str, current_time: datetime) -> dict:
 輸出：{{"type": "weather", "period": "today"}}
 period: today / tomorrow / week
 
-【edit】修改特定行事曆活動
+【edit】修改特定行事曆活動（關鍵字：改到、改成、更正、延到、延後、提前、換地點…）
 輸出：{{"type": "edit", "target_datetime": "ISO8601+08:00", "has_time": true, "title_hint": null, "new_start": null, "new_location": null}}
+target_datetime = 原本活動的時間（不知道幾點就用當天 09:00 並設 has_time=false）；new_start = 新的時間；title_hint = 活動名稱關鍵字。
+例：「更正明天的行程，本來明天要去依伶家改到星期五早上10點」→ target_datetime=明天09:00、has_time=false、title_hint="依伶"、new_start=星期五10:00
 
 【delete】刪除行事曆活動
 輸出：{{"type": "delete", "target_datetime": "ISO8601+08:00", "has_time": true, "title_hint": null}}

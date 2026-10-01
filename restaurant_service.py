@@ -1,14 +1,16 @@
 import os
 import requests
 
-DEFAULT_LAT = 23.3352
-DEFAULT_LON = 121.3178
-DEFAULT_LOCATION_NAME = "玉里"
+# 「附近餐廳」的搜尋中心：預設台北市文山區（家裡附近）。
+# 出門旅行時可在 Railway 設環境變數 RESTAURANT_AREA / RESTAURANT_LAT / RESTAURANT_LON 暫時改地點。
+DEFAULT_LOCATION_NAME = os.environ.get("RESTAURANT_AREA", "台北市文山區")
+DEFAULT_LAT = float(os.environ.get("RESTAURANT_LAT", "24.9897"))
+DEFAULT_LON = float(os.environ.get("RESTAURANT_LON", "121.5703"))
 
 
 def search_nearby_restaurants(keyword: str = "", location_name: str = DEFAULT_LOCATION_NAME,
                                lat: float = DEFAULT_LAT, lon: float = DEFAULT_LON,
-                               radius: int = 1000) -> list[dict]:
+                               radius: int = 2000) -> list[dict]:
     api_key = os.environ["GOOGLE_MAPS_API_KEY"]
     search_query = keyword if keyword else "餐廳"
     url = "https://maps.googleapis.com/maps/api/place/textsearch/json"

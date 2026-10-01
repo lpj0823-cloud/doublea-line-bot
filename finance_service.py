@@ -1,5 +1,7 @@
 import json
 import os
+
+from paths import data_path
 import uuid
 from datetime import datetime
 import pytz
@@ -7,7 +9,7 @@ import pytz
 from state_service import USE_FIRESTORE
 
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
-FINANCE_FILE = os.path.join(os.path.dirname(__file__), "finance_data.json")
+FINANCE_FILE = data_path("finance_data.json")
 
 
 def _get_db():

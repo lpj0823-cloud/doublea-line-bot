@@ -83,6 +83,24 @@ def run_selftest(scheduler=None) -> list[dict]:
         return f"推播對象類型：{kind}" + ("（⚠️ 是私訊，排程會送到私訊而非群組）" if cid[:1] == "U" else "")
     results.append(_check("排程推播對象", push_target))
 
+    def persistence():
+        from paths import data_dir, is_persistent
+        if not is_persistent():
+            raise RuntimeError(f"資料存在 {data_dir()}，重新部署會被清空；請掛 Volume 並設 DATA_DIR")
+        return f"資料存在永久磁碟 {data_dir()}"
+    results.append(_check("購物／筆記／生日／記帳資料保存", persistence))
+
+    def weather():
+        from weather_service import get_current_weather
+        w = get_current_weather()
+        return f"台北 {w['temp']}°C {w['description']}"
+    results.append(_check("天氣 API", weather))
+
+    def restaurants():
+        from restaurant_service import DEFAULT_LOCATION_NAME, search_nearby_restaurants
+        return f"{DEFAULT_LOCATION_NAME} 找到 {len(search_nearby_restaurants())} 家"
+    results.append(_check("餐廳 API", restaurants))
+
     if scheduler is not None:
         jobs = [f"{j.name}@{j.next_run_time:%m/%d %H:%M}" for j in scheduler.get_jobs()]
         results.append({"item": "排程器", "ok": bool(jobs), "detail": "；".join(jobs) or "沒有任何排程"})

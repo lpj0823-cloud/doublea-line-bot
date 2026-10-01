@@ -251,6 +251,25 @@ gcloud run deploy doublea-bot --source . --region asia-east1 --project YOUR_PROJ
 
 ---
 
+## 2026-10-01 深度檢查與修正
+
+**線上紀錄查到的問題（Railway logs 9/29–10/1）**
+1. Google 授權過期（`invalid_grant`）：10/1 起行事曆、待辦全部失敗。原因多半是 OAuth 應用程式仍在「測試」模式，refresh token 7 天失效。
+   - 永久解法：Google Cloud Console → Google Auth Platform → 目標對象（Audience）→「發布應用程式」改為正式版。
+   - 重新授權：在 LINE 傳「重新授權」，取得 15 分鐘有效的連結，照網頁 ①～④ 完成（新 token 存在 `DATA_DIR/google_token.json`，優先於 `GOOGLE_TOKEN_JSON`）。
+2. LINE 推播額度用完（429 monthly limit）：推播到群組的則數 = 群組人數，6 人群組每天 3 次推播約 12 天就用完免費 200 則。
+   - 改成每天只推一次 07:00「早安摘要」（今日行程＋天氣＋壽星＋精選箴言，放在同一次推播），每月約 150～180 則。
+   - 18:00 晚間摘要、行程前 2 小時提醒改為選用：`ENABLE_EVENING_PUSH`、`ENABLE_EVENT_REMINDER`，送出前會檢查剩餘額度，保留月底前每天早安摘要的用量。
+3. 行程前 2 小時提醒在 Railway 從未送出：原本靠 Cloud Scheduler 呼叫 `/check-reminders`，Railway 沒有；提醒也只存在記憶體。現改為每 5 分鐘檢查（選用），並存進 `chat_state.json`。
+4. 購物／筆記／生日／記帳資料每次部署都被清空：JSON 存在容器內。新增 `paths.py`，所有資料檔改存 `DATA_DIR`（Railway Volume 掛 `/data`）。
+
+**其他修正**
+- 「附近餐廳」原本寫死花蓮玉里，改為台北市文山區（可用 `RESTAURANT_AREA/LAT/LON` 調整）。
+- 「更正明天的行程…改到星期五」原被當成查詢；行程查詢只接手短句或有查詢語氣的句子，修改語氣交給 AI，AI 提示詞補上修改範例。
+- Google 授權過期時回覆明確提示，不再只說「請稍後再試」。
+- 照片建行程不再推播「⏳ 正在分析…」（省額度）；回覆超過 5,000 字自動分段。
+- 新增 LINE 指令「自我檢查」「重新授權」。
+
 ## 2026-09-29 修正紀錄與自我檢查
 
 **修正內容**

@@ -44,6 +44,8 @@ from state_service import (
     get_due_reminders,
     load_chat_id,
     load_last_event,
+    load_state,
+    save_state,
     load_pending_edit,
     load_pending_image,
     mark_reminder_sent,
@@ -69,6 +71,8 @@ from shopping_service import (
 from notes_service import add_note, delete_note_by_index, get_notes
 from proverbs_service import get_todays_proverbs, get_proverbs_header, get_daily_verses
 from rate_limiter import check_rate_limit
+from paths import is_persistent
+from google_auth import auth_error_hint, is_auth_expired_error
 from birthday_service import (
     add_birthday,
     delete_birthday_by_index,
@@ -116,27 +120,93 @@ def _is_calendar_trigger(text: str) -> bool:
 scheduler = AsyncIOScheduler(timezone=TAIPEI_TZ)
 
 
+def _gerr(e: Exception, default: str) -> str:
+    """Google 授權過期時給明確提示，其他錯誤用原本的訊息。"""
+    return auth_error_hint(e) if is_auth_expired_error(e) else default
+
+
 def _push_target() -> str | None:
     """排程推播的目的地：優先用環境變數 PUSH_CHAT_ID（建議設成「培正家」群組 ID），
     否則用最近一次記住的群組。"""
     return os.environ.get("PUSH_CHAT_ID") or load_chat_id()
 
 
+def _env_on(name: str, default: str = "false") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+# ── 推播額度 ─────────────────────────────────────────────────────────────────
+# LINE 免費方案每月 200 則；推播到群組時「則數 = 群組人數」，6 人群組推一次就算 5～6 則。
+# 因此預設每天只推一次「早安摘要」（多個對話框放在同一次推播，只算一次人數）。
+# 想要 18:00 晚間摘要或「開始前 2 小時提醒」，升級方案後把下列環境變數設成 true：
+#   ENABLE_EVENING_PUSH=true、ENABLE_EVENT_REMINDER=true
+# 這兩種「選用推播」會先檢查剩餘額度，確保月底前每天早安摘要還推得出去。
+
+def _line_get(path: str) -> dict:
+    r = requests.get(
+        f"https://api.line.me{path}",
+        headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _recipients(chat_id: str) -> int:
+    """一則推播會被算成幾則（群組 = 成員數）。查不到就保守估 6。"""
+    try:
+        if chat_id.startswith("C"):
+            return int(_line_get(f"/v2/bot/group/{chat_id}/members/count").get("count", 6))
+        if chat_id.startswith("R"):
+            return int(_line_get(f"/v2/bot/room/{chat_id}/members/count").get("count", 6))
+        return 1
+    except Exception as e:
+        print(f"[DoubleA] 查詢群組人數失敗：{e}")
+        return 6
+
+
+def _quota_remaining() -> int | None:
+    """本月剩餘可推播則數；無上限或查不到時回傳 None。"""
+    try:
+        quota = _line_get("/v2/bot/message/quota")
+        if quota.get("type") != "limited":
+            return None
+        used = _line_get("/v2/bot/message/quota/consumption").get("totalUsage", 0)
+        return int(quota.get("value", 0)) - int(used)
+    except Exception as e:
+        print(f"[DoubleA] 查詢推播額度失敗：{e}")
+        return None
+
+
+def _optional_push_allowed(chat_id: str) -> bool:
+    """選用推播（晚間摘要、行程提醒）：剩餘額度要先保留到月底每天的早安摘要。"""
+    remaining = _quota_remaining()
+    if remaining is None:
+        return True
+    now = datetime.now(TAIPEI_TZ)
+    next_month = (now.replace(day=28) + timedelta(days=4)).replace(day=1)
+    days_left = (next_month.date() - now.date()).days  # 含今天
+    per_push = _recipients(chat_id)
+    reserve = per_push * days_left
+    ok = remaining - per_push >= reserve
+    if not ok:
+        print(f"[DoubleA] 額度保留給早安摘要：剩 {remaining} 則、需保留 {reserve} 則，略過選用推播")
+    return ok
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # 只保留兩則自動推播（節省 LINE 每月 push 額度）：
-    #   06:00 → 今天的行事曆
-    #   18:00 → 明天的行事曆
-    # 其餘功能（箴言、天氣、餐廳、待辦、購物、記帳…）一律改為「傳訊息才回覆」。
-    scheduler.add_job(morning_calendar_job, CronTrigger(hour=6, minute=0, timezone=TAIPEI_TZ))
-    scheduler.add_job(evening_calendar_job, CronTrigger(hour=18, minute=0, timezone=TAIPEI_TZ))
-    # 07:00 生日提醒（當天沒人生日就不推播、不耗額度）＋ 07:05 每日箴言。
-    # 若要再省 push 額度，把環境變數 ENABLE_PROVERB_PUSH 設成 false 即可關閉箴言推播。
-    scheduler.add_job(birthday_reminder_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
-    if os.environ.get("ENABLE_PROVERB_PUSH", "true").lower() != "false":
-        scheduler.add_job(proverbs_job, CronTrigger(hour=7, minute=5, timezone=TAIPEI_TZ))
+    # 預設每天只推一次：07:00 早安摘要（今日行程＋天氣＋壽星＋精選箴言，同一次推播）。
+    scheduler.add_job(morning_digest_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
+    jobs = ["07:00 早安摘要"]
+    if _env_on("ENABLE_EVENING_PUSH"):
+        scheduler.add_job(evening_digest_job, CronTrigger(hour=18, minute=0, timezone=TAIPEI_TZ))
+        jobs.append("18:00 晚間摘要")
+    if _env_on("ENABLE_EVENT_REMINDER"):
+        scheduler.add_job(reminder_check_job, "interval", minutes=5)
+        jobs.append("行程前 2 小時提醒")
     scheduler.start()
-    print("[DoubleA] 排程器已啟動：06:00 今日行事曆、07:00 生日、07:05 箴言、18:00 明日行事曆")
+    print(f"[DoubleA] 排程器已啟動：{'、'.join(jobs)}；資料永久保存：{is_persistent()}")
     yield
     scheduler.shutdown()
     print("[DoubleA] 排程器已停止")
@@ -171,7 +241,8 @@ def _reply_line(reply_token: str, text: str) -> None:
             MessagingApi(api_client).reply_message(
                 ReplyMessageRequest(
                     reply_token=reply_token,
-                    messages=[TextMessage(text=text)],
+                    # 超過 5000 字自動分段（一次回覆最多 5 個對話框），避免被 LINE 拒收後改用付費推播
+                    messages=[TextMessage(text=c) for c in _chunk_text(text)[:5]],
                 )
             )
     except Exception as e:
@@ -455,6 +526,130 @@ def proverbs_job() -> None:
         print(f"[DoubleA] 箴言發送失敗：{e}")
 
 
+def _push_bundle(chat_id: str, texts: list[str]) -> None:
+    """把多段文字放在「同一次」推播（最多 5 個對話框），額度只算一次群組人數。"""
+    bubbles: list[str] = []
+    for t in texts:
+        bubbles.extend(_chunk_text(t))
+    if len(bubbles) > 5:
+        print(f"[DoubleA] 推播內容超過 5 個對話框，只送前 5 個（原 {len(bubbles)} 個）")
+        bubbles = bubbles[:5]
+    with ApiClient(line_config) as api_client:
+        MessagingApi(api_client).push_message(
+            PushMessageRequest(to=chat_id, messages=[TextMessage(text=b) for b in bubbles])
+        )
+
+
+def _weather_line() -> str | None:
+    try:
+        current = get_current_weather()
+        forecasts = get_daily_forecast(1)
+        if not forecasts:
+            return f"🌦 天氣｜{current['emoji']} {current['description']}，現在 {current['temp']}°C"
+        fc = forecasts[0]
+        pop_str = f"🌂 降雨 {fc['pop']}%" if fc["pop"] > 0 else "☀️ 不會下雨"
+        return (
+            f"🌦 今日天氣｜{current['emoji']} {current['description']}\n"
+            f"🌡 現在 {current['temp']}°C，今日 {fc['temp_min']}～{fc['temp_max']}°C　{pop_str}"
+        )
+    except Exception as e:
+        print(f"[DoubleA] 天氣取得失敗：{e}")
+        return None
+
+
+def build_morning_digest(now: datetime) -> list[str]:
+    """早安摘要內容：[行程＋天氣＋壽星, 精選箴言]（兩個對話框）。"""
+    head = f"☀️ 早安！今天是 {now.strftime('%-m月%-d日')}"
+    try:
+        events = list_events_for_date(now)
+        head += "\n\n" + ("📅 今日行程\n" + _format_day_events(events) if events else "📅 今天沒有行程")
+    except Exception as e:
+        print(f"[DoubleA] 早安摘要：行事曆取得失敗 {e}")
+        head += "\n\n" + auth_error_hint(e)
+    w = _weather_line()
+    if w:
+        head += "\n\n" + w
+    try:
+        bdays = get_todays_birthdays(now.month, now.day)
+        if bdays:
+            lines = []
+            for b in bdays:
+                age = f"（滿 {now.year - b['year']} 歲）" if b.get("year") else ""
+                lines.append(f"🎂 今天是【{b['name']}】的生日{age}！")
+            head += "\n\n" + "\n".join(lines) + "\n🎉 祝生日快樂、平安喜樂！"
+    except Exception as e:
+        print(f"[DoubleA] 早安摘要：生日取得失敗 {e}")
+    parts = [head]
+    if _env_on("ENABLE_PROVERB_PUSH", "true"):
+        try:
+            zh_v, en_v = get_daily_verses(now)
+            parts.append(f"🕊️ 今日箴言\n\n{zh_v}\n\n{en_v}\n\n（傳「箴言」看整章）")
+        except Exception as e:
+            print(f"[DoubleA] 早安摘要：箴言取得失敗 {e}")
+    return parts
+
+
+def morning_digest_job() -> None:
+    """每日 07:00：早安摘要（一次推播，只算一次群組人數）。"""
+    chat_id = _push_target()
+    if not chat_id:
+        print("[DoubleA] 早安摘要：找不到 chat_id，略過")
+        return
+    now = datetime.now(TAIPEI_TZ)
+    try:
+        _push_bundle(chat_id, build_morning_digest(now))
+        print("[DoubleA] 早安摘要已發送")
+    except Exception as e:
+        print(f"[DoubleA] 早安摘要推播失敗：{e}")
+
+
+def evening_digest_job() -> None:
+    """（選用）每日 18:00：明天行程＋未完成待辦。需 ENABLE_EVENING_PUSH=true。"""
+    chat_id = _push_target()
+    if not chat_id or not _optional_push_allowed(chat_id):
+        return
+    now = datetime.now(TAIPEI_TZ)
+    tomorrow = now + timedelta(days=1)
+    msg = f"🌙 晚安！明天 {tomorrow.strftime('%-m月%-d日')}"
+    try:
+        events = list_events_for_date(tomorrow)
+        msg += "\n\n" + ("📅 明天行程\n" + _format_day_events(events) if events else "📅 明天沒有行程")
+    except Exception as e:
+        msg += "\n\n" + auth_error_hint(e)
+    try:
+        tasks = get_pending_tasks()
+        if tasks:
+            msg += "\n\n📋 還沒完成的待辦\n" + "\n".join(f"{i}. {t['title']}" for i, t in enumerate(tasks, 1))
+    except Exception as e:
+        print(f"[DoubleA] 晚間摘要：待辦取得失敗 {e}")
+    try:
+        _push_bundle(chat_id, [msg])
+        print("[DoubleA] 晚間摘要已發送")
+    except Exception as e:
+        print(f"[DoubleA] 晚間摘要推播失敗：{e}")
+
+
+def reminder_check_job() -> None:
+    """（選用）每 5 分鐘檢查到期的行程提醒。需 ENABLE_EVENT_REMINDER=true。"""
+    now = datetime.now(TAIPEI_TZ)
+    for r in get_due_reminders(now):
+        rid = r.get("_doc_id", r.get("_id"))
+        try:
+            start_dt = datetime.fromisoformat(r["start"])
+            if start_dt.tzinfo is None:
+                start_dt = TAIPEI_TZ.localize(start_dt)
+            if start_dt < now:  # 行程已開始（例如伺服器停機錯過），不補發
+                mark_reminder_sent(rid)
+                continue
+            if not _optional_push_allowed(r["chat_id"]):
+                mark_reminder_sent(rid)
+                continue
+            send_event_reminder(r["chat_id"], r["title"], r["start"])
+            mark_reminder_sent(rid)
+        except Exception as e:
+            print(f"[DoubleA] 行程提醒發送失敗：{e}")
+
+
 def morning_briefing_job() -> None:
     chat_id = load_chat_id()
     if not chat_id:
@@ -571,7 +766,7 @@ def _format_calendar_confirmation(event_data: dict, event_link: str) -> str:
         f"🗓 {date_str}{location_line}"
         f"{link_line}\n\n"
         f"✅ Ginny 已收到邀請\n"
-        f"⏰ 將於開始前 2 小時提醒\n\n"
+        f"{'⏰ 將於開始前 2 小時提醒' if _env_on('ENABLE_EVENT_REMINDER') else '⏰ 當天 07:00 早安摘要會提醒'}\n\n"
         f"📤 分享給其他人（點擊即可加入行事曆）\n{share_link}"
     )
 
@@ -586,7 +781,8 @@ def _format_multi_calendar_confirmation(results: list[dict]) -> str:
         loc = ev.get("location")
         loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
         lines.append(f"{i}.【{ev['title']}】{date_str}{loc_part}")
-    lines.append("\n✅ Ginny 已收到邀請\n⏰ 將於各活動開始前 2 小時提醒")
+    lines.append("\n✅ Ginny 已收到邀請\n" + (
+        "⏰ 將於各活動開始前 2 小時提醒" if _env_on("ENABLE_EVENT_REMINDER") else "⏰ 當天 07:00 早安摘要會提醒"))
     return "\n".join(lines)
 
 
@@ -662,6 +858,8 @@ def _format_weather_week(forecasts: list[dict]) -> str:
 # ── Reminder helpers ──────────────────────────────────────────────────────────
 
 def schedule_event_reminder(chat_id: str, event_data: dict) -> None:
+    if not _env_on("ENABLE_EVENT_REMINDER"):
+        return  # 免費方案預設關閉（推播額度不夠），升級後設 ENABLE_EVENT_REMINDER=true
     start_dt = datetime.fromisoformat(event_data["start"])
     reminder_dt = start_dt - timedelta(minutes=REMINDER_MINUTES)
     now = datetime.now(TAIPEI_TZ)
@@ -703,8 +901,17 @@ def _menu_text() -> str:
         "🌦️ 天氣：「今天天氣」「明天天氣」「這週天氣」\n"
         "📖 箴言：傳「箴言」看整章\n"
         "🙏 平安：今日行程＋待辦＋精選箴言\n\n"
-        "⏰ 自動提醒：06:00 今天行程、07:00 生日、07:05 精選箴言、18:00 明天行程。"
+        + _schedule_desc()
     )
+
+
+def _schedule_desc() -> str:
+    s = "⏰ 自動提醒：每天 07:00 早安摘要（今日行程＋天氣＋壽星＋精選箴言）"
+    if _env_on("ENABLE_EVENING_PUSH"):
+        s += "、18:00 明天行程＋待辦"
+    if _env_on("ENABLE_EVENT_REMINDER"):
+        s += "、行程開始前 2 小時提醒"
+    return s + "。其他時間傳「平安」就能隨時查看。"
 
 
 _FILLER_RE = re.compile(
@@ -724,8 +931,16 @@ _EXACT_ALIASES: dict[str, tuple[str, ...]] = {
     "修改行程": ("修改行程", "改行程", "編輯行程", "更改行程"),
     "選單": ("選單", "功能", "功能表", "功能選單", "說明", "幫助", "help", "menu", "指令", "怎麼用", "?", "？"),
     "群組ID": ("群組id", "chatid", "群組編號", "聊天室id", "群組代號"),
+    "重新授權": ("重新授權", "授權", "google授權", "重新登入", "reauth"),
+    "自我檢查": ("自我檢查", "自檢", "健康檢查", "系統檢查", "檢查功能", "selftest"),
 }
-_ALIAS_LOOKUP = {a: canon for canon, alts in _EXACT_ALIASES.items() for a in alts}
+_ALIAS_LOOKUP = {a.lower(): canon for canon, alts in _EXACT_ALIASES.items() for a in alts}
+# 別名本身含「查、看、的…」這類贅字時，比對前會被去掉，所以也登記去掉贅字後的版本
+_ALIAS_LOOKUP.update({
+    _FILLER_RE.sub("", a.lower()): canon
+    for canon, alts in _EXACT_ALIASES.items() for a in alts
+    if _FILLER_RE.sub("", a.lower()) and _FILLER_RE.sub("", a.lower()) not in _ALIAS_LOOKUP
+})
 
 # 「指令 + 內容」類的各種說法 → 標準格式（(pattern, replacement, 是否為寬鬆比對)）
 _PREFIX_RULES: list[tuple[re.Pattern, str, bool]] = [
@@ -796,7 +1011,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             head += "\n\n" + ("📅 今日行程\n" + _format_day_events(evs) if evs else "📅 今天沒有行程")
         except Exception as e:
             print(f"[DoubleA] 平安：行事曆取得失敗 {e}")
-            head += "\n\n📅 行事曆暫時無法取得"
+            head += "\n\n" + _gerr(e, "📅 行事曆暫時無法取得")
         try:
             tasks = get_pending_tasks()
             if tasks:
@@ -805,7 +1020,8 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
                 head += "\n\n📋 目前沒有待辦事項 ✅"
         except Exception as e:
             print(f"[DoubleA] 平安：待辦取得失敗 {e}")
-            head += "\n\n📋 待辦暫時無法取得"
+            if not is_auth_expired_error(e):
+                head += "\n\n📋 待辦暫時無法取得"
         parts = [head]
         try:
             zh_v, en_v = get_daily_verses(_now)
@@ -822,6 +1038,31 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
     # 「選單」= 功能選單
     if text.strip() == "選單":
         _respond(_menu_text())
+        return True
+
+    # 「重新授權」= 產生 15 分鐘有效的 Google 重新授權連結（只有群組裡的家人拿得到）
+    if text.strip() == "重新授權":
+        import secrets
+        nonce = secrets.token_urlsafe(18)
+        save_state({"reauth_nonce": nonce, "reauth_exp": time.time() + 900})
+        _respond(
+            "🔑 Google 重新授權連結（15 分鐘內有效，請勿轉傳）：\n"
+            f"{_public_base_url()}/reauth?token={nonce}\n\n"
+            "用電腦或手機瀏覽器打開，照頁面上 ①～④ 步驟完成即可。"
+        )
+        return True
+
+    # 「自我檢查」= 逐項檢查 Google、LINE 額度、天氣、餐廳、資料保存、排程
+    if text.strip() == "自我檢查":
+        try:
+            from selftest import run_selftest
+            rs = run_selftest(scheduler)
+            ok = all(r["ok"] for r in rs)
+            lines = [f"🩺 自我檢查：{'全部正常 ✅' if ok else '有項目異常 ❌'}\n"]
+            lines += [f"{'✅' if r['ok'] else '❌'} {r['item']}：{r['detail'][:80]}" for r in rs]
+            _respond("\n".join(lines))
+        except Exception as e:
+            _respond(f"⚠️ 自我檢查執行失敗：{type(e).__name__}")
         return True
 
     # 「群組ID」= 回覆目前聊天室的 ID，用來設定 Railway 的 PUSH_CHAT_ID
@@ -848,7 +1089,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             tasks = get_pending_tasks()
             _respond(_format_todo_list(tasks))
         except Exception as e:
-            _respond(f"⚠️ 無法取得待辦清單：{e}")
+            _respond(_gerr(e, "⚠️ 無法取得待辦清單，請稍後再試。"))
         return True
 
     if text.startswith("完成 ") or text.startswith("done "):
@@ -889,7 +1130,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             else:
                 _push_delete_picker(chat_id, events, reply_token, _used)
         except Exception as e:
-            _respond(f"⚠️ 無法取得行程：{e}")
+            _respond(_gerr(e, "⚠️ 無法取得行程，請稍後再試。"))
         return True
 
     if text.startswith("確認刪除 "):
@@ -909,7 +1150,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             else:
                 _push_edit_picker(chat_id, events, reply_token, _used)
         except Exception as e:
-            _respond(f"⚠️ 無法取得行程：{e}")
+            _respond(_gerr(e, "⚠️ 無法取得行程，請稍後再試。"))
         return True
 
     if text.startswith("選擇修改 "):
@@ -1183,12 +1424,19 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
 
     # 行事曆查詢（今天/明天/這週…行程）：常見詞先用程式算日期範圍，不用 AI。
     # 只在確定是「查詢」而不是「新增／修改／刪除」時才接手，其餘交給 AI 判斷。
-    _CALENDAR_CREATE_VERBS = ("加到", "加入", "新增", "建立", "排入", "排進", "排到")
-    _CALENDAR_EDIT_VERBS = ("刪除", "取消", "修改")
+    _CALENDAR_CREATE_VERBS = ("加到", "加入", "新增", "增加", "建立", "排入", "排進", "排到", "記到", "記入")
+    _CALENDAR_EDIT_VERBS = (
+        "刪除", "刪掉", "取消", "修改", "更正", "更改", "改到", "改成", "改為", "改期",
+        "調整", "延到", "延後", "延期", "提前", "移到", "換到", "挪到",
+    )
+    _CALENDAR_QUERY_HINTS = ("有什麼", "有哪些", "有沒有", "查", "看", "?", "？", "嗎", "幾點", "列出", "給我")
+    _plain = re.sub(r"[\s「」!！。,，]", "", text)
     if (
         ("行程" in text or "行事曆" in text)
         and not any(v in text for v in _CALENDAR_CREATE_VERBS)
         and not any(v in text for v in _CALENDAR_EDIT_VERBS)
+        # 只接手「像查詢」的句子：很短（例如「明天行程」）或有查詢語氣；長句交給 AI
+        and (len(_plain) <= 8 or any(h in text for h in _CALENDAR_QUERY_HINTS))
     ):
         now = datetime.now(TAIPEI_TZ)
         today = now.date()
@@ -1226,7 +1474,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
                 events = list_events_for_range(start_dt, end_dt) if is_range else list_events_for_date(start_dt)
                 reply = _format_calendar_query_result(label, events, is_range)
             except Exception as e:
-                reply = "⚠️ 查詢行事曆失敗，請稍後再試。"
+                reply = _gerr(e, "⚠️ 查詢行事曆失敗，請稍後再試。")
             _respond(reply)
             return True
 
@@ -1512,10 +1760,11 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
                 schedule_event_reminder(chat_id, ev)
                 reply = _format_calendar_confirmation(ev, created["link"]) + f"\n\n{_cheer_calendar()}"
             except Exception as e:
-                reply = "⚠️ 行事曆寫入失敗，請稍後再試。"
+                reply = _gerr(e, "⚠️ 行事曆寫入失敗，請稍後再試。")
             _respond(reply)
         else:
             succeeded, failed = [], []
+            _last_err = None
             for ev in events:
                 ev["description"] = text
                 _fix_event_times(ev)
@@ -1526,12 +1775,13 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
                     succeeded.append({"event_data": ev, "link": created["link"]})
                 except Exception as e:
                     failed.append(ev.get("title", "未知事件"))
+                    _last_err = e
             if succeeded:
                 reply = _format_multi_calendar_confirmation(succeeded) + f"\n\n{_cheer_calendar()}"
                 if failed:
                     reply += f"\n\n⚠️ 以下事件建立失敗：{'、'.join(failed)}"
             else:
-                reply = "⚠️ 行事曆寫入失敗，請稍後再試。"
+                reply = _gerr(_last_err, "⚠️ 行事曆寫入失敗，請稍後再試。") if _last_err else "⚠️ 行事曆寫入失敗，請稍後再試。"
             try:
                 _send_texts(chat_id, [reply], reply_token, _used_reply)
             except Exception as _e:
@@ -1548,7 +1798,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
                 f"{_cheer_todo()}"
             )
         except Exception as e:
-            reply = "⚠️ 待辦事項記錄失敗，請稍後再試。"
+            reply = _gerr(e, "⚠️ 待辦事項記錄失敗，請稍後再試。")
         _respond(reply)
 
     elif msg_type == "query":
@@ -1562,7 +1812,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
             events = list_events_for_range(start_dt, end_dt) if is_range else list_events_for_date(start_dt)
             reply = _format_calendar_query_result(label, events, is_range)
         except Exception as e:
-            reply = "⚠️ 查詢行事曆失敗，請稍後再試。"
+            reply = _gerr(e, "⚠️ 查詢行事曆失敗，請稍後再試。")
         _respond(reply)
 
     else:
@@ -1687,10 +1937,7 @@ def process_image_as_calendar(
 
     message_id = pending["message_id"]
 
-    try:
-        _push_line(chat_id, "⏳ 正在從照片分析行程...")
-    except Exception as e:
-        print(f"[DoubleA] 分析中通知失敗：{e}")
+    # 不再推播「⏳ 正在分析…」：每次推播到群組都會扣掉群組人數的額度。
 
     try:
         image_bytes, mime_type = _download_line_content(message_id)
@@ -1933,6 +2180,77 @@ def selftest_endpoint(token: str = ""):
     from selftest import run_selftest
     results = run_selftest(scheduler)
     return {"all_ok": all(r["ok"] for r in results), "results": results}
+
+
+def _check_admin_token(token: str) -> None:
+    """允許兩種通行碼：環境變數 SELFTEST_TOKEN，或在 LINE 傳「重新授權」取得的一次性連結（15 分鐘內有效）。"""
+    token = token or ""
+    expected = os.environ.get("SELFTEST_TOKEN", "")
+    if expected and hmac.compare_digest(token, expected):
+        return
+    st = load_state()
+    nonce, exp = st.get("reauth_nonce") or "", st.get("reauth_exp") or 0
+    if nonce and token and time.time() < exp and hmac.compare_digest(token, nonce):
+        return
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _public_base_url() -> str:
+    host = os.environ.get("PUBLIC_URL") or os.environ.get("RAILWAY_PUBLIC_DOMAIN") or "web-production-040883.up.railway.app"
+    return host if host.startswith("http") else f"https://{host}"
+
+
+def _reauth_page(token: str, notice: str = "") -> str:
+    from reauth_service import build_auth_url
+    try:
+        auth_url = build_auth_url()
+        link = f'<a class="btn" href="{auth_url}" target="_blank" rel="noopener">① 登入 Google 並授權</a>'
+    except Exception as e:
+        link = f"<p>⚠️ 讀不到 Google 用戶端設定：{type(e).__name__}</p>"
+    tok = urllib.parse.quote(token)
+    return f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>重新授權 Google｜培正家AI小幫手</title>
+<style>body{{font-family:sans-serif;max-width:640px;margin:32px auto;padding:0 16px;line-height:1.7}}
+.btn{{display:inline-block;background:#0f6b5c;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none}}
+textarea{{width:100%;min-height:90px;font-size:14px}} button{{font-size:16px;padding:8px 18px}}
+.n{{padding:10px 14px;border-radius:8px;background:#eef6f3}}</style></head><body>
+<h1>重新授權 Google 行事曆／待辦</h1>
+{f'<p class="n">{notice}</p>' if notice else ''}
+<p>{link}</p>
+<p>② 用 Google 帳號登入、按「繼續／允許」。最後瀏覽器會跳到一個<b>「無法連線」</b>的 localhost 頁面，這是正常的。</p>
+<p>③ 把那一頁<b>網址列的整串網址</b>複製，貼到下面送出。</p>
+<form method="post" action="/reauth?token={tok}">
+<textarea name="pasted" placeholder="http://localhost:8765/?code=...&scope=..."></textarea>
+<p><button type="submit">④ 送出完成授權</button></p></form>
+</body></html>"""
+
+
+@app.get("/reauth", response_class=HTMLResponse)
+def reauth_get(token: str = ""):
+    _check_admin_token(token)
+    return _reauth_page(token)
+
+
+@app.post("/reauth", response_class=HTMLResponse)
+async def reauth_post(request: Request, token: str = ""):
+    _check_admin_token(token)
+    from reauth_service import exchange_code, extract_code
+    form = urllib.parse.parse_qs((await request.body()).decode("utf-8"))
+    code = extract_code((form.get("pasted") or [""])[0])
+    if not code:
+        return _reauth_page(token, "⚠️ 沒有找到授權碼，請貼上 localhost 那一頁網址列的整串網址。")
+    try:
+        exchange_code(code)
+        n = len(list_events_for_date(datetime.now(TAIPEI_TZ)))
+        msg = f"✅ 授權成功！已讀到今天 {n} 筆行程，行事曆與待辦恢復正常。"
+        if not is_persistent():
+            msg += "（注意：尚未設定永久磁碟 DATA_DIR，重新部署後需再授權一次）"
+        print("[DoubleA] Google 重新授權成功")
+        return _reauth_page(token, msg)
+    except Exception as e:
+        print(f"[DoubleA] Google 重新授權失敗：{e}")
+        return _reauth_page(token, f"⚠️ 授權失敗：{e}。授權碼只能用一次，請從 ① 重新開始。")
 
 
 @app.get("/health")

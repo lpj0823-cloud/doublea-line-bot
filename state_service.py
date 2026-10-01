@@ -5,6 +5,8 @@ State persistence:
 """
 import json
 import os
+
+from paths import data_path
 import time
 from datetime import datetime
 
@@ -16,7 +18,7 @@ print(
     f"USE_FIRESTORE(env)={os.environ.get('USE_FIRESTORE')!r} → USE_FIRESTORE(flag)={USE_FIRESTORE}"
 )
 
-CHAT_STATE_FILE = os.path.join(os.path.dirname(__file__), "chat_state.json")
+CHAT_STATE_FILE = data_path("chat_state.json")
 FIRESTORE_COLLECTION = "doublea"
 FIRESTORE_STATE_DOC = "state"
 FIRESTORE_REMINDERS = "reminders"
@@ -128,8 +130,12 @@ def add_reminder(chat_id: str, event_data: dict, reminder_dt: datetime) -> None:
             return
         except Exception as e:
             print(f"[DoubleA] Firestore add_reminder 失敗，fallback 記憶體：{e}")
-    payload["_id"] = len(_local_reminders)
-    _local_reminders.append(payload)
+    # 本機／Railway：存進 chat_state.json（放在 DATA_DIR 的永久磁碟），重新部署不會遺失
+    reminders = [r for r in (_local_load_state().get("reminders") or []) if not r.get("sent")]
+    payload["_id"] = f"{event_data['start']}_{chat_id}_{event_data['title']}"
+    if not any(r.get("_id") == payload["_id"] for r in reminders):
+        reminders.append(payload)
+    _local_save_state({"reminders": reminders})
 
 
 def get_due_reminders(now: datetime) -> list:
@@ -151,8 +157,8 @@ def get_due_reminders(now: datetime) -> list:
         except Exception as e:
             print(f"[DoubleA] Firestore get_due_reminders 失敗，fallback 記憶體：{e}")
     return [
-        r for r in _local_reminders
-        if not r["sent"] and datetime.fromisoformat(r["reminder_time"]) <= now
+        r for r in (_local_load_state().get("reminders") or [])
+        if not r.get("sent") and datetime.fromisoformat(r["reminder_time"]) <= now
     ]
 
 
@@ -163,9 +169,9 @@ def mark_reminder_sent(doc_id) -> None:
             return
         except Exception as e:
             print(f"[DoubleA] Firestore mark_reminder_sent 失敗，fallback 記憶體：{e}")
-    for r in _local_reminders:
-        if r.get("_id") == doc_id:
-            r["sent"] = True
+    reminders = _local_load_state().get("reminders") or []
+    # 已送出的直接移除，避免檔案越長越大
+    _local_save_state({"reminders": [r for r in reminders if r.get("_id") != doc_id]})
 
 
 # ── Pending edit state ────────────────────────────────────────────────────────

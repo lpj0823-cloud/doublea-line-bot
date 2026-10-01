@@ -1,9 +1,11 @@
 import json
 import os
+
+from paths import data_path
 import re
 
 USE_FIRESTORE = bool(os.environ.get("K_SERVICE") or os.environ.get("USE_FIRESTORE"))
-BIRTHDAYS_FILE = os.path.join(os.path.dirname(__file__), "birthdays.json")
+BIRTHDAYS_FILE = data_path("birthdays.json")
 FIRESTORE_COLLECTION = "doublea"
 FIRESTORE_DOC = "birthdays"
 

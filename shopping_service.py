@@ -1,8 +1,10 @@
 import json
 import os
 
+from paths import data_path
+
 USE_FIRESTORE = bool(os.environ.get("K_SERVICE") or os.environ.get("USE_FIRESTORE"))
-SHOPPING_FILE = os.path.join(os.path.dirname(__file__), "shopping_list.json")
+SHOPPING_FILE = data_path("shopping_list.json")
 FIRESTORE_COLLECTION = "doublea"
 FIRESTORE_DOC = "shopping"
 

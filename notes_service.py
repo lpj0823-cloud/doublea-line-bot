@@ -1,11 +1,13 @@
 import json
 import os
+
+from paths import data_path
 from datetime import datetime
 
 import pytz
 
 USE_FIRESTORE = bool(os.environ.get("K_SERVICE") or os.environ.get("USE_FIRESTORE"))
-NOTES_FILE = os.path.join(os.path.dirname(__file__), "notes.json")
+NOTES_FILE = data_path("notes.json")
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
 FIRESTORE_COLLECTION = "doublea"
 FIRESTORE_DOC = "notespad"
