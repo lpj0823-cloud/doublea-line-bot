@@ -14,8 +14,8 @@ ZH_VERSION = "unv"   # 和合本（繁體）
 EN_VERSION = "web"   # World English Bible（NIV 為版權譯本，無免費 API，改用公共版權的 WEB）
 
 
-def _fetch_fhl_chapter(chapter: int, version: str) -> tuple[bool, list[dict]]:
-    """向信望愛站 API 抓取箴言指定章。回傳 (成功與否, record 陣列)。"""
+def _fetch_fhl_chapter(chapter: int, version: str, book: str = "箴") -> tuple[bool, list[dict]]:
+    """向信望愛站 API 抓取指定書卷（預設箴言）的指定章。回傳 (成功與否, record 陣列)。"""
     last_err = None
     data = None
     for attempt in range(3):  # 網路偶發失敗時重試，最多 3 次
@@ -23,7 +23,7 @@ def _fetch_fhl_chapter(chapter: int, version: str) -> tuple[bool, list[dict]]:
             r = requests.get(
                 FHL_API,
                 params={
-                    "chineses": "箴",
+                    "chineses": book,
                     "chap": chapter,
                     "gb": 0,          # 0 = 繁體（Big5）
                     "version": version,

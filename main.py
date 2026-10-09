@@ -70,6 +70,7 @@ from shopping_service import (
 )
 from notes_service import add_note, delete_note_by_index, get_notes
 from proverbs_service import get_todays_proverbs, get_proverbs_header, get_daily_verses
+from bible_plan_service import get_daily_reading, allowed_user_ids
 from rate_limiter import check_rate_limit
 from paths import is_persistent
 from google_auth import auth_error_hint, is_auth_expired_error
@@ -1844,6 +1845,42 @@ def _download_line_content(message_id: str) -> tuple[bytes, str]:
     return resp.content, mime_type
 
 
+_BIBLE_READING_CMDS = {"讀經", "每日讀經", "今日讀經", "今天讀經", "讀經進度",
+                       "每日讀經進度", "今日讀經進度", "今天讀經進度", "傳每日讀經進度"}
+
+
+def _is_bible_reading_cmd(text: str) -> bool:
+    """只認固定說法（去掉空白與標點後完全相同），「我今天讀經了」這類聊天不會誤觸。"""
+    t = re.sub(r"[\s「」『』\"'“”!！?？。,，、~～]", "", text)
+    return t in _BIBLE_READING_CMDS
+
+
+def process_bible_reading(user_id: str, chat_id: str, reply_token: str | None = None) -> None:
+    """每日讀經進度：只開放給 BIBLE_READER_IDS 裡的人（培正的兩支 LINE）。"""
+    _used: list[bool] = [False]
+    allowed = allowed_user_ids()
+    if not allowed:
+        # 尚未設定：把發問者的 ID 給他，填進 Railway 後才開放
+        uid = user_id or "（讀不到，請改用私訊再傳一次）"
+        _send_texts(chat_id, [
+            "📖 每日讀經尚未設定使用者。\n"
+            f"你的 LINE ID：\n{uid}\n\n"
+            "把它填到 Railway 環境變數 BIBLE_READER_IDS（多個用逗號隔開）就能使用。"
+        ], reply_token, _used)
+        return
+    if user_id not in allowed:
+        print(f"[DoubleA] 每日讀經：非授權使用者 {user_id[:6]}…，不回應")
+        return
+    try:
+        _send_texts(chat_id, get_daily_reading(), reply_token, _used)
+    except Exception as e:
+        print(f"[DoubleA] 每日讀經失敗：{e}")
+        try:
+            _send_texts(chat_id, ["⚠️ 讀經進度暫時無法取得，請稍後再試。"], reply_token, _used)
+        except Exception:
+            pass
+
+
 def process_image(message_id: str, chat_id: str, reply_token: str | None = None) -> None:
     """背景任務：收到圖片。
 
@@ -2089,6 +2126,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     text = re.sub(re.escape(BOT_MENTION), "", text, flags=re.IGNORECASE).strip()
                 if not text:
                     continue
+            if _is_bible_reading_cmd(text):
+                background_tasks.add_task(process_bible_reading, source.get("userId", ""), chat_id, reply_token)
+                continue
             background_tasks.add_task(process_message, text, chat_id, reply_token)
         elif msg.get("type") == "image":
             message_id = msg.get("id", "")
