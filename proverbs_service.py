@@ -1,3 +1,4 @@
+import calendar
 import time
 
 import requests
@@ -82,19 +83,31 @@ def _fetch_en_chapter(chapter: int) -> str:
         return f"⚠️ Proverbs Chapter {chapter} (WEB) temporarily unavailable."
 
 
+def chapters_for(now: datetime) -> list[int]:
+    """當天要分享的章：平常是「日期＝章」；當月最後一天若不到 31 日，
+    把剩下沒分享的章一起給（例：9/30 → 30、31；平年 2/28 → 28～31）。"""
+    last_day = calendar.monthrange(now.year, now.month)[1]
+    day = now.day
+    if day == last_day and day < 31:
+        return list(range(day, 32))
+    return [((day - 1) % 31) + 1]
+
+
+def _chapter_label(chapters: list[int]) -> str:
+    return f"{chapters[0]}" if len(chapters) == 1 else f"{chapters[0]}–{chapters[-1]}"
+
+
 def get_todays_proverbs(now: datetime = None) -> tuple[str, str]:
     """
-    根據當天日期決定要讀哪章箴言（1日→第1章，循環31章）。
+    當天要讀的箴言整章（1日→第1章；月底不到 31 日時連剩下的章一起給）。
     回傳 (中文經文, 英文經文)
     """
     if now is None:
         now = datetime.now(TAIPEI_TZ)
 
-    day = now.day
-    chapter = ((day - 1) % 31) + 1
-
-    zh = _fetch_zh_chapter(chapter)
-    en = _fetch_en_chapter(chapter)
+    chapters = chapters_for(now)
+    zh = "\n\n".join(_fetch_zh_chapter(c) for c in chapters)
+    en = "\n\n".join(_fetch_en_chapter(c) for c in chapters)
 
     return zh, en
 
@@ -104,21 +117,15 @@ def get_proverbs_header(now: datetime = None) -> str:
     if now is None:
         now = datetime.now(TAIPEI_TZ)
 
-    day = now.day
-    chapter = ((day - 1) % 31) + 1
+    chapters = chapters_for(now)
     date_str = now.strftime("%-m月%-d日")
+    note = "（月底，剩下的章一起分享）" if len(chapters) > 1 else ""
 
-    return f"🕊️ {date_str} 每日箴言 — 第 {chapter} 章"
+    return f"🕊️ {date_str} 每日箴言 — 第 {_chapter_label(chapters)} 章{note}"
 
 
-def get_daily_verses(now: datetime = None, count: int = 3) -> tuple[str, str]:
-    """精選版：當天章節中，依日期輪流挑連續 count 節（中英同節），適合「平安」與每日推播。
-    回傳 (中文, 英文)。整章請用 get_todays_proverbs。"""
-    if now is None:
-        now = datetime.now(TAIPEI_TZ)
-    day = now.day
-    chapter = ((day - 1) % 31) + 1
-
+def _pick_verses(chapter: int, day: int, count: int) -> tuple[str, str]:
+    """某一章中，依日期輪流挑連續 count 節（中英同節）。回傳 (中文, 英文)。"""
     ok_zh, zh_recs = _fetch_fhl_chapter(chapter, ZH_VERSION)
     ok_en, en_recs = _fetch_fhl_chapter(chapter, EN_VERSION)
     if not ok_zh or not zh_recs:
@@ -142,4 +149,17 @@ def get_daily_verses(now: datetime = None, count: int = 3) -> tuple[str, str]:
         en = "\n".join(en_lines)
     else:
         en = f"📖 Proverbs {chapter}:{rng} (WEB) temporarily unavailable."
+    return zh, en
+
+
+def get_daily_verses(now: datetime = None, count: int = 3) -> tuple[str, str]:
+    """精選版：當天要分享的每一章，各挑連續 count 節（中英同節），適合「平安」與每日推播。
+    月底不到 31 日時，剩下的章各挑 count 節一起給。
+    回傳 (中文, 英文)。整章請用 get_todays_proverbs。"""
+    if now is None:
+        now = datetime.now(TAIPEI_TZ)
+
+    picks = [_pick_verses(c, now.day, count) for c in chapters_for(now)]
+    zh = "\n\n".join(z for z, _ in picks)
+    en = "\n\n".join(e for _, e in picks)
     return zh, en
