@@ -612,17 +612,25 @@ def evening_digest_job() -> None:
     now = datetime.now(TAIPEI_TZ)
     tomorrow = now + timedelta(days=1)
     msg = f"🌙 晚安！明天 {tomorrow.strftime('%-m月%-d日')}"
+    has_content = False  # 沒行程、沒待辦就不推：推到群組一則＝群組人數，省額度也少打擾
     try:
         events = list_events_for_date(tomorrow)
-        msg += "\n\n" + ("📅 明天行程\n" + _format_day_events(events) if events else "📅 明天沒有行程")
+        if events:
+            msg += "\n\n📅 明天行程\n" + _format_day_events(events)
+            has_content = True
     except Exception as e:
         msg += "\n\n" + auth_error_hint(e)
+        has_content = True  # 授權失效要讓人知道
     try:
         tasks = get_pending_tasks()
         if tasks:
             msg += "\n\n📋 還沒完成的待辦\n" + "\n".join(f"{i}. {t['title']}" for i, t in enumerate(tasks, 1))
+            has_content = True
     except Exception as e:
         print(f"[DoubleA] 晚間摘要：待辦取得失敗 {e}")
+    if not has_content:
+        print("[DoubleA] 晚間摘要：明天沒行程也沒待辦，不推播")
+        return
     try:
         _push_bundle(chat_id, [msg])
         print("[DoubleA] 晚間摘要已發送")
