@@ -28,6 +28,11 @@ def invite_label() -> str:
     return "群組成員" if invitees() else ""
 
 
+def _all_day(item: dict) -> bool:
+    """整天的行程只有日期、沒有時間：查行程時顯示「整天」，不顯示 00:00。"""
+    return "dateTime" not in item.get("start", {})
+
+
 def list_events_for_date(date: datetime) -> list[dict]:
     """列出指定日期的所有行事曆事件（台北時間）。回傳 [{"title", "start_str"}, ...]"""
     service = build("calendar", "v3", credentials=get_credentials())
@@ -61,7 +66,9 @@ def list_events_for_date(date: datetime) -> list[dict]:
                 start_str = start
         else:
             start_str = ""
-        events.append({"title": title, "start_str": start_str, "location": location})
+        if _all_day(item):
+            start_str = "整天"
+        events.append({"title": title, "start_str": start_str, "location": location, "all_day": _all_day(item)})
 
     return events
 
@@ -107,7 +114,10 @@ def list_events_for_range(start_date: datetime, end_date: datetime) -> list[dict
         else:
             date_str = ""
             start_str = ""
-        events.append({"title": title, "start_str": start_str, "date_str": date_str, "location": location})
+        if _all_day(item):
+            start_str = "整天"
+        events.append({"title": title, "start_str": start_str, "date_str": date_str, "location": location,
+                       "all_day": _all_day(item)})
 
     return events
 
@@ -147,12 +157,15 @@ def list_upcoming_events(days: int = 7) -> list[dict]:
         except ValueError:
             date_str = start[:10]
             start_str = ""
+        if _all_day(item):
+            start_str = "整天"
         events.append({
             "id": item["id"],
             "title": title,
             "date_str": date_str,
             "start_str": start_str,
             "location": location,
+            "all_day": _all_day(item),
         })
     return events
 

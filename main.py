@@ -811,7 +811,7 @@ def daily_reminder_job() -> None:
     sections = []
     try:
         cal_events = list_events_for_date(now)
-        remaining = [ev for ev in cal_events if ev.get("start_str", "") > "17:00"]
+        remaining = [ev for ev in cal_events if ev.get("start_str", "") > "17:00" and not ev.get("all_day")]
         if remaining:
             lines = ["📅 今晚行事曆\n"]
             for ev in remaining:
@@ -2652,7 +2652,7 @@ async def daily_reminder():
     sections = []
     try:
         cal_events = list_events_for_date(now)
-        remaining = [ev for ev in cal_events if ev["start_str"] > "17:00"]
+        remaining = [ev for ev in cal_events if ev["start_str"] > "17:00" and not ev.get("all_day")]
         if remaining:
             lines = ["📅 今晚行事曆\n"]
             for ev in remaining:
