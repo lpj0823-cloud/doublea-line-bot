@@ -144,7 +144,7 @@ def _env_on(name: str, default: str = "false") -> bool:
 
 def _feature_on(name: str) -> bool:
     """FEATURES_OFF 列出的功能就關掉（公司版用）；沒設＝全部開（家用版）。
-    可關：birthday 生日、finance 記帳與收據、restaurant 餐廳、proverb 箴言與平安、bible 讀經。"""
+    可關：birthday 生日、finance 記帳與收據、restaurant 餐廳、proverb 箴言與平安、bible 讀經、share 行程確認附的分享連結。"""
     return name not in {f.strip().lower() for f in os.environ.get("FEATURES_OFF", "").split(",")}
 
 
@@ -404,7 +404,7 @@ def _push_delete_picker(chat_id: str, events: list[dict], reply_token: str | Non
     qr_items = []
     for ev in events:
         time_part = f"{ev['start_str']} " if ev.get("start_str") else ""
-        lines.append(f"📅 {ev['date_str']} {time_part}【{ev['title']}】")
+        lines.append(f"📅 {ev['date_str']} {time_part}{_t(ev['title'])}")
         if len(qr_items) < 13:
             label = f"{ev['date_str']} {time_part}{ev['title']}"[:20]
             qr_items.append(QuickReplyItem(action=MessageAction(label=label, text=f"確認刪除 {ev['id']}")))
@@ -417,7 +417,7 @@ def _push_edit_picker(chat_id: str, events: list[dict], reply_token: str | None 
     qr_items = []
     for ev in events:
         time_part = f"{ev['start_str']} " if ev.get("start_str") else ""
-        lines.append(f"📅 {ev['date_str']} {time_part}【{ev['title']}】")
+        lines.append(f"📅 {ev['date_str']} {time_part}{_t(ev['title'])}")
         if len(qr_items) < 13:
             label = f"{ev['date_str']} {time_part}{ev['title']}"[:20]
             qr_items.append(QuickReplyItem(action=MessageAction(label=label, text=f"選擇修改 {ev['id']} {ev['title']}")))
@@ -431,7 +431,7 @@ def _push_field_picker(chat_id: str, event_id: str, event_title: str, reply_toke
         QuickReplyItem(action=MessageAction(label="🕐 時間", text=f"修改欄位 start {event_id} {event_title}")),
         QuickReplyItem(action=MessageAction(label="📍 地點", text=f"修改欄位 location {event_id} {event_title}")),
     ]
-    msg = TextMessage(text=f"要修改【{event_title}】的哪個欄位？", quick_reply=QuickReply(items=qr_items))
+    msg = TextMessage(text=f"要修改{_t(event_title)}的哪個欄位？", quick_reply=QuickReply(items=qr_items))
     _send_line_msg(chat_id, msg, reply_token, _used)
 
 
@@ -535,7 +535,7 @@ def _format_day_events(events: list[dict]) -> str:
         time_part = f"{ev['start_str']} " if ev.get("start_str") else ""
         loc = ev.get("location", "")
         loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
-        lines.append(f"📅 {time_part}【{ev['title']}】{loc_part}")
+        lines.append(f"📅 {time_part}{_t(ev['title'])}{loc_part}")
     return "\n".join(lines)
 
 
@@ -775,7 +775,7 @@ def morning_briefing_job() -> None:
             time_part = f"{ev['start_str']} " if ev.get("start_str") else ""
             loc = ev.get("location", "")
             loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
-            lines.append(f"📅 {time_part}【{ev['title']}】{loc_part}")
+            lines.append(f"📅 {time_part}{_t(ev['title'])}{loc_part}")
         msg = "\n".join(lines)
     try:
         current = get_current_weather()
@@ -812,7 +812,7 @@ def daily_reminder_job() -> None:
             for ev in remaining:
                 loc = ev.get("location", "")
                 loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
-                lines.append(f"・{ev['start_str']} 【{ev['title']}】{loc_part}")
+                lines.append(f"・{ev['start_str']} {_t(ev['title'])}{loc_part}")
             sections.append("\n".join(lines))
     except Exception as e:
         print(f"[DoubleA] 下午提醒排程：行事曆取得失敗 {e}")
@@ -866,6 +866,20 @@ def _invite_line(invited: bool) -> str:
     return f"👤 僅記錄在你的行事曆（未邀請 {who}）" if who else "👤 僅記錄在行事曆"
 
 
+def _reminder_line(multi: bool = False) -> str:
+    """行程確認訊息的提醒說明；公司版兩種提醒都沒開就不寫（不能說會提醒卻沒提醒）。"""
+    if _env_on("ENABLE_EVENT_REMINDER"):
+        return "⏰ 將於各活動開始前 2 小時提醒" if multi else "⏰ 將於開始前 2 小時提醒"
+    if _env_on("ENABLE_MORNING_PUSH", "true"):
+        return "⏰ 當天 07:00 早安摘要會提醒"
+    return ""
+
+
+def _t(title: str) -> str:
+    """標題加【】；公司版標題本身已是【專案｜負責人】開頭就不再包一層。"""
+    return title if str(title).startswith("【") else f"【{title}】"
+
+
 def _format_calendar_confirmation(event_data: dict, event_link: str, invited: bool = True) -> str:
     start_dt = datetime.fromisoformat(event_data["start"])
     date_str = start_dt.strftime("%-m月%-d日 %H:%M")
@@ -875,12 +889,12 @@ def _format_calendar_confirmation(event_data: dict, event_link: str, invited: bo
     share_link = _generate_share_link(event_data)
     return (
         f"📅 已加入行事曆！\n\n"
-        f"【{event_data['title']}】\n"
+        f"{_t(event_data['title'])}\n"
         f"🗓 {date_str}{location_line}"
         f"{link_line}\n\n"
-        f"{_invite_line(invited)}\n"
-        f"{'⏰ 將於開始前 2 小時提醒' if _env_on('ENABLE_EVENT_REMINDER') else '⏰ 當天 07:00 早安摘要會提醒'}\n\n"
-        f"📤 分享給其他人（點擊即可加入行事曆）\n{share_link}"
+        f"{_invite_line(invited)}"
+        + (f"\n{_reminder_line()}" if _reminder_line() else "")
+        + (f"\n\n📤 分享給其他人（點擊即可加入行事曆）\n{share_link}" if _feature_on("share") else "")
     )
 
 
@@ -893,9 +907,8 @@ def _format_multi_calendar_confirmation(results: list[dict], invited: bool = Tru
         date_str = start_dt.strftime("%-m月%-d日 %H:%M")
         loc = ev.get("location")
         loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
-        lines.append(f"{i}.【{ev['title']}】{date_str}{loc_part}")
-    lines.append("\n" + _invite_line(invited) + "\n" + (
-        "⏰ 將於各活動開始前 2 小時提醒" if _env_on("ENABLE_EVENT_REMINDER") else "⏰ 當天 07:00 早安摘要會提醒"))
+        lines.append(f"{i}.{_t(ev['title'])}{date_str}{loc_part}")
+    lines.append("\n" + _invite_line(invited) + (f"\n{_reminder_line(multi=True)}" if _reminder_line(multi=True) else ""))
     return "\n".join(lines)
 
 
@@ -988,7 +1001,7 @@ def send_event_reminder(chat_id: str, title: str, start_str: str) -> None:
     date_str = start_dt.strftime("%-m月%-d日 %H:%M")
     text = (
         f"⏰ 提醒！\n\n"
-        f"【{title}】\n"
+        f"{_t(title)}\n"
         f"🗓 {date_str} 即將開始\n"
         f"還有 2 小時！"
     )
@@ -1258,7 +1271,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             if not title and _loose:
                 return False  # 寬鬆說法（如「完成買菜」）找不到待辦 → 交給 AI，不攔一般聊天
             if title:
-                msg = f"✅ 已完成：【{title}】\n\n{_cheer_complete()}"
+                msg = f"✅ 已完成：{_t(title)}\n\n{_cheer_complete()}"
             else:
                 msg = f"❓ 找不到包含「{keyword}」的待辦事項"
             _respond(msg)
@@ -1275,7 +1288,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
         try:
             title = complete_task_by_index(n)
             if title:
-                msg = f"✅ 已完成：【{title}】\n\n{_cheer_complete()}"
+                msg = f"✅ 已完成：{_t(title)}\n\n{_cheer_complete()}"
             else:
                 msg = f"❓ 找不到第 {n} 項待辦事項"
             _respond(msg)
@@ -1298,7 +1311,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
         event_id = text.split("確認刪除 ", 1)[1].strip()
         try:
             title = delete_event_by_id(event_id)
-            _respond(f"✅ 已刪除：【{title}】")
+            _respond(f"✅ 已刪除：{_t(title)}")
         except Exception as e:
             _respond(f"⚠️ 刪除失敗：{e}")
         return True
@@ -1335,7 +1348,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             field_name = {"title": "標題", "start": "時間", "location": "地點"}.get(field, field)
             hint = {"title": "（例如：家庭聚會）", "start": "（例如：明天下午3點）", "location": "（例如：教會）"}.get(field, "")
             save_pending_edit(chat_id, {"event_id": event_id, "field": field, "title": event_title})
-            _respond(f"請輸入【{event_title}】的新{field_name}：\n{hint}\n\n輸入「取消」可放棄修改")
+            _respond(f"請輸入{_t(event_title)}的新{field_name}：\n{hint}\n\n輸入「取消」可放棄修改")
         return True
 
     # ── 購物清單 ──────────────────────────────────────────────────────────────
@@ -1906,13 +1919,13 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None, use
                     new_dt = TAIPEI_TZ.localize(new_dt)
                 else:
                     new_dt = new_dt.astimezone(TAIPEI_TZ)
-                _respond(f"✅ 已修改：【{event_title}】\n🗓 新時間：{new_dt.strftime('%-m月%-d日 %H:%M')}")
+                _respond(f"✅ 已修改：{_t(event_title)}\n🗓 新時間：{new_dt.strftime('%-m月%-d日 %H:%M')}")
             elif field == "title":
                 update_event_field_by_id(event_id, "title", text.strip())
                 _respond(f"✅ 已修改標題：\n【{text.strip()}】")
             elif field == "location":
                 update_event_field_by_id(event_id, "location", text.strip())
-                _respond(f"✅ 已修改地點：【{event_title}】\n📍 {text.strip()}")
+                _respond(f"✅ 已修改地點：{_t(event_title)}\n📍 {text.strip()}")
         except Exception as e:
             print(f"[DoubleA] 行程欄位更新失敗：{e}")
             _respond("⚠️ 修改失敗，請稍後再試。")
@@ -1981,7 +1994,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None, use
                 target_dt = datetime.fromisoformat(target_dt_str)
                 updated = find_and_update_event(target_dt, has_time, title_hint, updates)
                 if updated:
-                    lines = [f"✅ 已修改：【{updated['title']}】"]
+                    lines = [f"✅ 已修改：{_t(updated['title'])}"]
                     if updated.get("new_start"):
                         new_dt = datetime.fromisoformat(updated["new_start"])
                         if new_dt.tzinfo is None:
@@ -2025,7 +2038,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None, use
             save_last_event(last["id"], {**last, **updates})
             start_dt = datetime.fromisoformat(updates["start"])
             date_str = start_dt.strftime("%-m月%-d日 %H:%M")
-            reply = f"✅ 行事曆已更新！\n\n【{last['title']}】\n🗓 {date_str}\n\n🔗 {link}"
+            reply = f"✅ 行事曆已更新！\n\n{_t(last['title'])}\n🗓 {date_str}\n\n🔗 {link}"
         except Exception as e:
             reply = "⚠️ 行事曆修改失敗，請稍後再試。"
         _respond(reply)
@@ -2080,7 +2093,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None, use
             task = add_task(result["title"], result.get("description"))
             reply = (
                 f"📌 已記錄到 Google Tasks！\n\n"
-                f"【{task['title']}】\n\n"
+                f"{_t(task['title'])}\n\n"
                 f"🔗 {TASKS_URL}\n\n"
                 f"完成後發「del N」或「完成 {task['title']}」即可標記\n\n"
                 f"{_cheer_todo()}"
