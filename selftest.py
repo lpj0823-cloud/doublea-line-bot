@@ -64,14 +64,16 @@ def _claude_ok() -> str:
     """實際問 Claude：金鑰能用、模型存在（不產生文字，不花錢）。"""
     import anthropic
     from event_parser import ANTHROPIC_MODEL
-    anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=15).models.retrieve(ANTHROPIC_MODEL)
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=15)
+    client.models.retrieve(ANTHROPIC_MODEL)
     return f"金鑰可以用（模型 {ANTHROPIC_MODEL}）"
 
 
 def _gemini_ok() -> str:
     """實際問 Gemini：金鑰能用（只查模型資料，不花錢）。"""
     from google import genai
-    genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"timeout": 15000}).models.get(model="gemini-2.5-flash")
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"timeout": 15000})  # 要先存起來，寫成一行 client 會先被關掉
+    client.models.get(model="gemini-2.5-flash")
     return "金鑰可以用（gemini-2.5-flash）"
 
 
