@@ -11,6 +11,23 @@ WIFE_EMAIL = "Ginnycyhuang@gmail.com"
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
 
 
+def invitees() -> list[str]:
+    """群組建立的行程要邀請誰：INVITE_EMAILS（逗號分隔；none＝不邀請）；沒設就維持家用版，邀請 Ginny。"""
+    raw = os.getenv("INVITE_EMAILS", "").strip()
+    if not raw:
+        return [WIFE_EMAIL]
+    if raw.lower() == "none":
+        return []
+    return [e.strip() for e in raw.split(",") if e.strip()]
+
+
+def invite_label() -> str:
+    """確認訊息裡的稱呼：家用版沿用 Ginny；公司版寫「群組成員」；不邀請時回空字串。"""
+    if not os.getenv("INVITE_EMAILS", "").strip():
+        return "Ginny"
+    return "群組成員" if invitees() else ""
+
+
 def list_events_for_date(date: datetime) -> list[dict]:
     """列出指定日期的所有行事曆事件（台北時間）。回傳 [{"title", "start_str"}, ...]"""
     service = build("calendar", "v3", credentials=get_credentials())
@@ -362,7 +379,7 @@ def find_and_update_event(
 
 
 def create_calendar_event(event_data: dict, invite_wife: bool = True) -> dict:
-    """Create a Google Calendar event; invite Ginny only when invite_wife. Returns {"id": ..., "link": ...}"""
+    """Create a Google Calendar event; invite invitees() (default Ginny) only when invite_wife. Returns {"id": ..., "link": ...}"""
     service = build("calendar", "v3", credentials=get_credentials())
 
     body: dict = {
@@ -371,8 +388,9 @@ def create_calendar_event(event_data: dict, invite_wife: bool = True) -> dict:
         "end": {"dateTime": event_data["end"], "timeZone": "Asia/Taipei"},
         "reminders": {"useDefault": True},
     }
-    if invite_wife:
-        body["attendees"] = [{"email": WIFE_EMAIL}]
+    emails = invitees() if invite_wife else []
+    if emails:
+        body["attendees"] = [{"email": e} for e in emails]
         body["guestsCanModifyEvent"] = True
 
     if event_data.get("location"):

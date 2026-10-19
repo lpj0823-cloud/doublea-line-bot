@@ -238,6 +238,7 @@ gcloud scheduler jobs create http doublea-check-reminders \
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE Channel access token |
 | `GEMINI_API_KEY` | Google Gemini API key |
 | `GOOGLE_TOKEN_JSON` | Google OAuth token（base64，由 auth_setup.py 產生） |
+| `INVITE_EMAILS` | （選用）群組建立的行程要邀請誰，逗號分隔；`none`＝不邀請；沒設＝家用版預設 |
 
 ---
 

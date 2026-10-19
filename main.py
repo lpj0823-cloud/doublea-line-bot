@@ -32,8 +32,8 @@ from linebot.v3.messaging import (
 
 from calendar_service import (
     create_calendar_event, delete_event_by_id, find_and_delete_event, find_and_update_event,
-    list_events_for_date, list_events_for_range, list_upcoming_events, update_calendar_event,
-    update_event_field_by_id,
+    invite_label, invitees, list_events_for_date, list_events_for_range, list_upcoming_events,
+    update_calendar_event, update_event_field_by_id,
 )
 from weather_service import get_current_weather, get_daily_forecast
 from event_parser import parse_image_for_event, parse_message, parse_modification, parse_new_datetime
@@ -762,6 +762,14 @@ def _generate_share_link(ev: dict) -> str:
 
 # ── Formatters ────────────────────────────────────────────────────────────────
 
+def _invite_line(invited: bool) -> str:
+    """行程確認訊息的邀請狀態：家用版文字不變；公司版依 INVITE_EMAILS。"""
+    who = invite_label()
+    if invited:
+        return f"✅ {who} 已收到邀請"
+    return f"👤 僅記錄在你的行事曆（未邀請 {who}）" if who else "👤 僅記錄在行事曆"
+
+
 def _format_calendar_confirmation(event_data: dict, event_link: str, invited: bool = True) -> str:
     start_dt = datetime.fromisoformat(event_data["start"])
     date_str = start_dt.strftime("%-m月%-d日 %H:%M")
@@ -774,7 +782,7 @@ def _format_calendar_confirmation(event_data: dict, event_link: str, invited: bo
         f"【{event_data['title']}】\n"
         f"🗓 {date_str}{location_line}"
         f"{link_line}\n\n"
-        f"{'✅ Ginny 已收到邀請' if invited else '👤 僅記錄在你的行事曆（未邀請 Ginny）'}\n"
+        f"{_invite_line(invited)}\n"
         f"{'⏰ 將於開始前 2 小時提醒' if _env_on('ENABLE_EVENT_REMINDER') else '⏰ 當天 07:00 早安摘要會提醒'}\n\n"
         f"📤 分享給其他人（點擊即可加入行事曆）\n{share_link}"
     )
@@ -790,7 +798,7 @@ def _format_multi_calendar_confirmation(results: list[dict], invited: bool = Tru
         loc = ev.get("location")
         loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
         lines.append(f"{i}.【{ev['title']}】{date_str}{loc_part}")
-    lines.append("\n" + ("✅ Ginny 已收到邀請" if invited else "👤 僅記錄在你的行事曆（未邀請 Ginny）") + "\n" + (
+    lines.append("\n" + _invite_line(invited) + "\n" + (
         "⏰ 將於各活動開始前 2 小時提醒" if _env_on("ENABLE_EVENT_REMINDER") else "⏰ 當天 07:00 早安摘要會提醒"))
     return "\n".join(lines)
 
@@ -1539,8 +1547,8 @@ def _cheer_todo() -> str:
 # ── Event time fixer ──────────────────────────────────────────────────────────
 
 def _invites_wife(chat_id: str) -> bool:
-    """群組／聊天室（C、R 開頭）建立的行程才邀請 Ginny；私訊（U 開頭）只寫自己的行事曆。"""
-    return chat_id.startswith(("C", "R"))
+    """群組／聊天室（C、R 開頭）建立的行程才邀請（對象見 invitees()，預設 Ginny）；私訊（U 開頭）只寫自己的行事曆。"""
+    return chat_id.startswith(("C", "R")) and bool(invitees())
 
 
 def _fix_event_times(ev: dict) -> None:
