@@ -30,13 +30,16 @@ def _gemini_client() -> genai.Client:
     return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 
-def parse_message(message: str, current_time: datetime) -> dict:
+def parse_message(message: str, current_time: datetime, with_project: bool = False) -> dict:
     weekday_map = {
         "Monday": "週一", "Tuesday": "週二", "Wednesday": "週三",
         "Thursday": "週四", "Friday": "週五", "Saturday": "週六", "Sunday": "週日",
     }
     weekday_zh = weekday_map.get(current_time.strftime("%A"), "")
     now_str = current_time.strftime(f"%Y-%m-%d %H:%M {weekday_zh}")
+    # 公司版（with_project）：行程多一個 project 欄位，給標題加【專案｜負責人】用
+    project_field = ', "project": null' if with_project else ""
+    project_rule = "- project：訊息裡提到的專案或案場名稱（例如 淡水林宅、依玲家），沒有就 null\n" if with_project else ""
 
     prompt = f"""現在時間：{now_str}（台北時間，UTC+8）
 
@@ -61,7 +64,7 @@ target_datetime = 原本活動的時間（不知道幾點就用當天 09:00 並�
 輸出：{{"type": "modify"}}
 
 【calendar】新增行事曆事件
-輸出：{{"type": "calendar", "events": [{{"title": "標題", "start": "ISO8601+08:00", "end": "ISO8601+08:00", "location": null}}]}}
+輸出：{{"type": "calendar", "events": [{{"title": "標題", "start": "ISO8601+08:00", "end": "ISO8601+08:00", "location": null{project_field}}}]}}
 
 【todo】有任務性質但沒有明確時間
 輸出：{{"type": "todo", "title": "任務描述", "description": null}}
@@ -73,7 +76,7 @@ target_datetime = 原本活動的時間（不知道幾點就用當天 09:00 並�
 - 每個獨立時間點 = 一筆獨立事件
 - 若無結束時間：end = start + 1小時
 - 若只有日期無時間：start 用 09:00
-- 只回傳 JSON，不要加任何說明或```符號
+{project_rule}- 只回傳 JSON，不要加任何說明或```符號
 
 訊息：「{message}」"""
 
@@ -86,6 +89,29 @@ target_datetime = 原本活動的時間（不知道幾點就用當天 09:00 並�
         return json.loads(text.strip())
     except Exception:
         return {"type": "ignore"}
+
+
+def parse_report_projects(report: str) -> list[str]:
+    """同事在群組貼的工作週報 → 專案名稱清單（照出現順序）；失敗回空清單。"""
+    prompt = f"""這是一位同事在 LINE 群組貼的工作週報。列出裡面每一個專案（案場）的名稱，照出現順序。
+規則：
+- 只要專案名稱，不要工作項目、日期、百分比、人名
+- 「其他」「雜項」這類不是專案，不要列
+- 名稱照原文，去掉前面的符號（✔、💡、'、-、編號）和後面的「：50%」
+- 只回傳 JSON：{{"projects": ["名稱", ...]}}，不要加任何說明或```符號
+
+週報：
+{report}"""
+    try:
+        text = _call_claude(prompt)
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        data = json.loads(text.strip())
+        return [p.strip() for p in data.get("projects", []) if isinstance(p, str) and p.strip()]
+    except Exception:
+        return []
 
 
 def parse_new_datetime(text: str, current_time: datetime) -> str | None:

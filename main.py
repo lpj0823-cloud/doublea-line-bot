@@ -32,11 +32,13 @@ from linebot.v3.messaging import (
 
 from calendar_service import (
     create_calendar_event, delete_event_by_id, find_and_delete_event, find_and_update_event,
-    list_events_for_date, list_events_for_range, list_upcoming_events, update_calendar_event,
-    update_event_field_by_id,
+    invite_label, invitees, list_events_for_date, list_events_for_range, list_upcoming_events,
+    update_calendar_event, update_event_field_by_id,
 )
 from weather_service import get_current_weather, get_daily_forecast
-from event_parser import parse_image_for_event, parse_message, parse_modification, parse_new_datetime
+from event_parser import (
+    parse_image_for_event, parse_message, parse_modification, parse_new_datetime, parse_report_projects,
+)
 from state_service import (
     add_reminder,
     clear_pending_edit,
@@ -69,6 +71,9 @@ from shopping_service import (
     mark_done_by_keyword,
 )
 from notes_service import add_note, delete_note_by_index, get_notes
+from owners_service import (
+    load_project_owners, projects_by_owner, remove_project_owner, set_project_owner, stale_pairs, update_from_report,
+)
 from proverbs_service import get_todays_proverbs, get_proverbs_header, get_daily_verses
 from bible_plan_service import get_daily_reading, allowed_user_ids
 from rate_limiter import check_rate_limit
@@ -98,7 +103,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"].strip()
 
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
 REMINDER_MINUTES = 120
-BOT_NAME = "培正家AI小幫手"
+BOT_NAME = os.environ.get("BOT_NAME", "").strip() or "培正家AI小幫手"  # 公司版設 BOT_NAME=力口小幫手
 BOT_MENTION = f"@{BOT_NAME}"
 
 # 圖片＋文字說明才觸發行事曆：
@@ -134,6 +139,74 @@ def _push_target() -> str | None:
 
 def _env_on(name: str, default: str = "false") -> bool:
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _feature_on(name: str) -> bool:
+    """FEATURES_OFF 列出的功能就關掉（公司版用）；沒設＝全部開（家用版）。
+    可關：birthday 生日、finance 記帳與收據、restaurant 餐廳、proverb 箴言與平安、bible 讀經。"""
+    return name not in {f.strip().lower() for f in os.environ.get("FEATURES_OFF", "").split(",")}
+
+
+# FEATURES_OFF 關掉的功能，標準化後的指令開頭
+_FEATURE_PREFIXES = {
+    "birthday": ("+生日", "生日清單", "刪生日"),
+    "finance": ("+專案", "+花費", "專案清單", "刪專案", "專案 "),
+    "restaurant": ("附近餐廳", "附近 "),
+}
+
+
+def _feature_off_command(text: str) -> bool:
+    t = text.strip()
+    return any(t.startswith(p) for f, ps in _FEATURE_PREFIXES.items() if not _feature_on(f) for p in ps)
+
+
+def _group_trigger() -> str:
+    """GROUP_TRIGGER：群組裡句子開頭要先叫它（例如「小幫手」）才處理；沒設＝每句都讀（家用版）。"""
+    return os.environ.get("GROUP_TRIGGER", "").strip()
+
+
+# 群組裡不用叫也會處理的指令（看標準化後的文字）
+_NO_TRIGGER_COMMANDS = {"待辦", "購物清單", "筆記", "清除已買", "刪除行程", "修改行程", "選單", "群組ID", "自我檢查",
+                        "重新授權", "負責清單", "負責人清單", "專案負責人", "手上的專案", "誰負責什麼",
+                        "今天天氣", "明天天氣", "這週天氣", "天氣"}
+_NO_TRIGGER_PREFIX = re.compile(r"^(?:\+|刪筆記\s*\d|del\s*\d|買到\s*\d|刪負責\s)")
+
+
+def _addressed_text(text: str, chat_id: str, mentioned: bool) -> str | None:
+    """群組訊息是不是在叫小幫手：是就回要處理的文字，不是回 None（不處理、不花 AI）。"""
+    trigger = _group_trigger()
+    if not trigger or mentioned:
+        return text
+    if text.startswith(trigger):
+        return text[len(trigger):].lstrip(" ，,：:、　") or "選單"
+    canon, _ = _canonicalize(text)
+    if canon in _NO_TRIGGER_COMMANDS or _NO_TRIGGER_PREFIX.match(canon):
+        return text
+    if load_pending_edit(chat_id) or (load_pending_image(chat_id) and _is_calendar_trigger(text)):
+        return text  # 正在選單操作、或傳完照片要加行事曆：下一句不用再叫
+    return None
+
+
+def _strip_self_mentions(raw: str, msg: dict) -> tuple[str, bool]:
+    """拿掉 LINE 標註裡的「@小幫手」，回傳 (文字, 有沒有標註小幫手)。"""
+    found = False
+    for m in sorted((msg.get("mention") or {}).get("mentionees", []), key=lambda m: m.get("index", 0), reverse=True):
+        if m.get("isSelf"):
+            i, n = m.get("index", 0), m.get("length", 0)
+            raw, found = raw[:i] + raw[i + n:], True
+    return raw.strip(), found
+
+
+_WEEKDAYS = {"mon": "一", "tue": "二", "wed": "三", "thu": "四", "fri": "五", "sat": "六", "sun": "日"}
+
+
+def _weekly_push_at() -> tuple[str, int, int] | None:
+    """WEEKLY_PUSH_AT 例如「mon 08:30」＝每週一 08:30，要搭配 WEEKLY_PUSH_TEXT；沒設或格式不對＝不推。"""
+    m = re.fullmatch(r"(mon|tue|wed|thu|fri|sat|sun)\s+(\d{1,2}):(\d{2})", os.environ.get("WEEKLY_PUSH_AT", "").strip().lower())
+    if not m or not os.environ.get("WEEKLY_PUSH_TEXT", "").strip():
+        return None
+    hour, minute = int(m.group(2)), int(m.group(3))
+    return (m.group(1), hour, minute) if hour < 24 and minute < 60 else None
 
 
 # ── 推播額度 ─────────────────────────────────────────────────────────────────
@@ -197,17 +270,24 @@ def _optional_push_allowed(chat_id: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # 預設每天只推一次：07:00 早安摘要（今日行程＋天氣＋壽星＋精選箴言，同一次推播）。
-    scheduler.add_job(morning_digest_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
-    jobs = ["07:00 早安摘要"]
+    # 預設每天只推一次：07:00 早安摘要（今日行程＋天氣＋壽星＋精選箴言，同一次推播）；公司版設 ENABLE_MORNING_PUSH=false 關掉。
+    jobs = []
+    if _env_on("ENABLE_MORNING_PUSH", "true"):
+        scheduler.add_job(morning_digest_job, CronTrigger(hour=7, minute=0, timezone=TAIPEI_TZ))
+        jobs.append("07:00 早安摘要")
     if _env_on("ENABLE_EVENING_PUSH"):
         scheduler.add_job(evening_digest_job, CronTrigger(hour=18, minute=0, timezone=TAIPEI_TZ))
         jobs.append("18:00 晚間摘要")
     if _env_on("ENABLE_EVENT_REMINDER"):
         scheduler.add_job(reminder_check_job, "interval", minutes=5)
         jobs.append("行程前 2 小時提醒")
+    weekly = _weekly_push_at()
+    if weekly:
+        day, hour, minute = weekly
+        scheduler.add_job(weekly_push_job, CronTrigger(day_of_week=day, hour=hour, minute=minute, timezone=TAIPEI_TZ))
+        jobs.append(f"每週{_WEEKDAYS[day]} {hour:02d}:{minute:02d} 固定推播")
     scheduler.start()
-    print(f"[DoubleA] 排程器已啟動：{'、'.join(jobs)}；資料永久保存：{is_persistent()}")
+    print(f"[DoubleA] 排程器已啟動：{'、'.join(jobs) or '無'}；資料永久保存：{is_persistent()}")
     yield
     scheduler.shutdown()
     print("[DoubleA] 排程器已停止")
@@ -571,7 +651,7 @@ def build_morning_digest(now: datetime) -> list[str]:
     if w:
         head += "\n\n" + w
     try:
-        bdays = get_todays_birthdays(now.month, now.day)
+        bdays = get_todays_birthdays(now.month, now.day) if _feature_on("birthday") else []
         if bdays:
             lines = []
             for b in bdays:
@@ -581,7 +661,7 @@ def build_morning_digest(now: datetime) -> list[str]:
     except Exception as e:
         print(f"[DoubleA] 早安摘要：生日取得失敗 {e}")
     parts = [head]
-    if _env_on("ENABLE_PROVERB_PUSH", "true"):
+    if _env_on("ENABLE_PROVERB_PUSH", "true") and _feature_on("proverb"):
         try:
             zh_v, en_v = get_daily_verses(now)
             parts.append(f"🕊️ 今日箴言\n\n{zh_v}\n\n{en_v}\n\n（傳「箴言」看整章）")
@@ -602,6 +682,21 @@ def morning_digest_job() -> None:
         print("[DoubleA] 早安摘要已發送")
     except Exception as e:
         print(f"[DoubleA] 早安摘要推播失敗：{e}")
+
+
+def weekly_push_job() -> None:
+    """（選用）每週固定推播一則（WEEKLY_PUSH_AT＋WEEKLY_PUSH_TEXT），例如週一 08:30 提醒交專案進度表。"""
+    chat_id = _push_target()
+    if not chat_id:
+        print("[DoubleA] 每週推播：找不到 chat_id，略過")
+        return
+    try:
+        msg = os.environ.get("WEEKLY_PUSH_TEXT", "").strip().replace("\\n", "\n")
+        owners = _owners_text() if _env_on("TAG_PROJECT_OWNER") else ""
+        _push_bundle(chat_id, [msg + ("\n\n" + owners if owners else "")])
+        print("[DoubleA] 每週推播已發送")
+    except Exception as e:
+        print(f"[DoubleA] 每週推播失敗：{e}")
 
 
 def evening_digest_job() -> None:
@@ -762,6 +857,14 @@ def _generate_share_link(ev: dict) -> str:
 
 # ── Formatters ────────────────────────────────────────────────────────────────
 
+def _invite_line(invited: bool) -> str:
+    """行程確認訊息的邀請狀態：家用版文字不變；公司版依 INVITE_EMAILS。"""
+    who = invite_label()
+    if invited:
+        return f"✅ {who} 已收到邀請"
+    return f"👤 僅記錄在你的行事曆（未邀請 {who}）" if who else "👤 僅記錄在行事曆"
+
+
 def _format_calendar_confirmation(event_data: dict, event_link: str, invited: bool = True) -> str:
     start_dt = datetime.fromisoformat(event_data["start"])
     date_str = start_dt.strftime("%-m月%-d日 %H:%M")
@@ -774,7 +877,7 @@ def _format_calendar_confirmation(event_data: dict, event_link: str, invited: bo
         f"【{event_data['title']}】\n"
         f"🗓 {date_str}{location_line}"
         f"{link_line}\n\n"
-        f"{'✅ Ginny 已收到邀請' if invited else '👤 僅記錄在你的行事曆（未邀請 Ginny）'}\n"
+        f"{_invite_line(invited)}\n"
         f"{'⏰ 將於開始前 2 小時提醒' if _env_on('ENABLE_EVENT_REMINDER') else '⏰ 當天 07:00 早安摘要會提醒'}\n\n"
         f"📤 分享給其他人（點擊即可加入行事曆）\n{share_link}"
     )
@@ -790,7 +893,7 @@ def _format_multi_calendar_confirmation(results: list[dict], invited: bool = Tru
         loc = ev.get("location")
         loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
         lines.append(f"{i}.【{ev['title']}】{date_str}{loc_part}")
-    lines.append("\n" + ("✅ Ginny 已收到邀請" if invited else "👤 僅記錄在你的行事曆（未邀請 Ginny）") + "\n" + (
+    lines.append("\n" + _invite_line(invited) + "\n" + (
         "⏰ 將於各活動開始前 2 小時提醒" if _env_on("ENABLE_EVENT_REMINDER") else "⏰ 當天 07:00 早安摘要會提醒"))
     return "\n".join(lines)
 
@@ -894,33 +997,55 @@ def send_event_reminder(chat_id: str, title: str, start_str: str) -> None:
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 def _menu_text() -> str:
+    lines = [  # (功能開關, 說明)；空字串＝一定開
+        ("", "📋 待辦：「記得買菜」新增；「待辦」查看；「完成 買菜」或「del 1」完成"),
+        ("", "🛒 購物：「+買 牛奶」；「購物清單」；「買到 1」"),
+        ("", "📓 筆記：「+記 內容」；「筆記」；「刪筆記 1」"),
+        ("birthday", "🎂 生日：「+生日 媽媽 3/15」；「生日清單」；「刪生日 1」"),
+        ("finance", "💰 記帳：「+專案 日本旅行」；「+花費 日本旅行 午餐 850」；「專案清單」"),
+        ("restaurant", "🍽️ 餐廳：「附近餐廳」或「附近 火鍋」"),
+        ("", "🌦️ 天氣：「今天天氣」「明天天氣」「這週天氣」"),
+        ("proverb", "📖 箴言：傳「箴言」看整章"),
+        ("proverb", "🙏 平安：今日行程＋待辦＋精選箴言"),
+    ]
     return (
-        "🙏 平安！我是培正家AI小幫手。\n"
-        "以下功能隨時傳訊息給我就能用：\n\n"
+        f"{'🙏 平安！' if _feature_on('proverb') else '👋 您好！'}我是{BOT_NAME}。\n"
+        + (f"群組裡句子開頭打「{_group_trigger()}」我才會處理（私訊直接講）；+記、+買、待辦這類指令不用叫：\n\n"
+           if _group_trigger() else "以下功能隨時傳訊息給我就能用：\n\n")
+        +
         "📅 行事曆\n"
         "・「明天下午3點開會」→ 自動加入\n"
         "・「今天有什麼行程」「這週有什麼」→ 查詢\n"
         "・「刪除行程」「修改行程」→ 選單操作\n\n"
-        "📋 待辦：「記得買菜」新增；「待辦」查看；「完成 買菜」或「del 1」完成\n"
-        "🛒 購物：「+買 牛奶」；「購物清單」；「買到 1」\n"
-        "📓 筆記：「+記 內容」；「筆記」；「刪筆記 1」\n"
-        "🎂 生日：「+生日 媽媽 3/15」；「生日清單」；「刪生日 1」\n"
-        "💰 記帳：「+專案 日本旅行」；「+花費 日本旅行 午餐 850」；「專案清單」\n"
-        "🍽️ 餐廳：「附近餐廳」或「附近 火鍋」\n"
-        "🌦️ 天氣：「今天天氣」「明天天氣」「這週天氣」\n"
-        "📖 箴言：傳「箴言」看整章\n"
-        "🙏 平安：今日行程＋待辦＋精選箴言\n\n"
-        + _schedule_desc()
+        + "\n".join(_menu_lines(lines))
+        + "\n\n" + _schedule_desc()
     )
 
 
+def _menu_lines(lines: list[tuple[str, str]]) -> list[str]:
+    shown = [text for feature, text in lines if not feature or _feature_on(feature)]
+    if _env_on("TAG_PROJECT_OWNER"):
+        shown.insert(3, "👥 專案負責人：「+負責 淡水林宅 淨雯」；「負責清單」；「刪負責 淡水林宅」")
+        if _members():
+            shown.append("📝 週報：第一行寫【名字】貼在群組，我會自動更新你手上的專案")
+    return shown
+
+
 def _schedule_desc() -> str:
-    s = "⏰ 自動提醒：每天 07:00 早安摘要（今日行程＋天氣＋壽星＋精選箴言）"
+    parts = []
+    if _env_on("ENABLE_MORNING_PUSH", "true"):
+        extra = [x for f, x in (("birthday", "壽星"), ("proverb", "精選箴言")) if _feature_on(f)]
+        parts.append("每天 07:00 早安摘要（" + "＋".join(["今日行程", "天氣", *extra]) + "）")
     if _env_on("ENABLE_EVENING_PUSH"):
-        s += "、18:00 明天行程＋待辦"
+        parts.append("18:00 明天行程＋待辦")
     if _env_on("ENABLE_EVENT_REMINDER"):
-        s += "、行程開始前 2 小時提醒"
-    return s + "。其他時間傳「平安」就能隨時查看。"
+        parts.append("行程開始前 2 小時提醒")
+    weekly = _weekly_push_at()
+    if weekly:
+        day, hour, minute = weekly
+        parts.append(f"每週{_WEEKDAYS[day]} {hour:02d}:{minute:02d} 固定提醒")
+    s = "⏰ 自動提醒：" + ("、".join(parts) if parts else "目前沒有開")
+    return s + ("。其他時間傳「平安」就能隨時查看。" if _feature_on("proverb") else "。")
 
 
 _FILLER_RE = re.compile(
@@ -1007,12 +1132,36 @@ def _loose_match(text: str, keyword: str, max_len: int = 8) -> bool:
 def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> bool:
     _used: list[bool] = [False]
     text, _loose = _canonicalize(text)  # 放寬文字解讀：各種說法先轉成標準指令
+    if _feature_off_command(text):
+        return False  # 這個部署關掉的功能（FEATURES_OFF）：當一般訊息處理，不回「沒開」
 
     def _respond(msg: str) -> None:
         _send_line_msg(chat_id, TextMessage(text=msg), reply_token, _used)
 
+    # ── 專案負責人清單（公司版，TAG_PROJECT_OWNER=true）──────────────────────────
+    if _env_on("TAG_PROJECT_OWNER"):
+        if text.startswith("+負責"):
+            pairs = _owner_pairs(text[len("+負責"):])
+            for project, owner in pairs:
+                set_project_owner(project, owner)
+            if len(pairs) == 1:
+                project, owner = pairs[0]
+                _respond(f"✅ 已記下：{project} → {owner}\n之後提到「{project}」的行程，標題會加【{project}｜{owner}】")
+            elif pairs:
+                _respond(f"✅ 已記下 {len(pairs)} 個專案：\n" + "\n".join(f"・{p} → {o}" for p, o in pairs))
+            else:
+                _respond("❓ 格式：+負責 專案名稱 負責人\n一次加很多：第一行「+負責」，下面每行「專案名稱 負責人」\n例：+負責 淡水林宅 淨雯")
+            return True
+        if text.strip() in ("負責清單", "負責人清單", "專案負責人", "手上的專案", "誰負責什麼"):
+            _respond(_owners_text() or "👥 還沒有專案負責人清單\n用「+負責 淡水林宅 淨雯」新增")
+            return True
+        if text.startswith("刪負責"):
+            name = text[len("刪負責"):].strip()
+            _respond(f"🗑️ 已刪除：{name}" if remove_project_owner(name) else f"❓ 清單裡沒有「{name}」，傳「負責清單」看看")
+            return True
+
     # 「平安」= 今日行程 + 待辦 + 今日精選箴言（中英各 3 節）；完整功能選單改傳「選單」
-    if _loose_match(text, "平安", 5) and "平安夜" not in text:
+    if _feature_on("proverb") and _loose_match(text, "平安", 5) and "平安夜" not in text:
         _now = datetime.now(TAIPEI_TZ)
         head = f"🙏 平安！今天是 {_now.strftime('%-m月%-d日')}"
         try:
@@ -1080,7 +1229,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
         return True
 
     # 「箴言」= 即時回覆今日箴言（中、英分開送，避免超過 LINE 5000 字上限）
-    if _loose_match(text, "箴言"):
+    if _feature_on("proverb") and _loose_match(text, "箴言"):
         try:
             now = datetime.now(TAIPEI_TZ)
             zh_text, en_text = get_todays_proverbs(now)
@@ -1538,9 +1687,124 @@ def _cheer_todo() -> str:
 
 # ── Event time fixer ──────────────────────────────────────────────────────────
 
+_NAME_CACHE: dict[str, str] = {}
+
+
+def _display_name(chat_id: str, user_id: str) -> str:
+    """發問的人的 LINE 名稱（群組用群組成員資料）；拿不到就回空字串。"""
+    if not user_id:
+        return ""
+    if user_id not in _NAME_CACHE:
+        try:
+            with ApiClient(line_config) as api_client:
+                api = MessagingApi(api_client)
+                if chat_id.startswith("C"):
+                    profile = api.get_group_member_profile(chat_id, user_id)
+                elif chat_id.startswith("R"):
+                    profile = api.get_room_member_profile(chat_id, user_id)
+                else:
+                    profile = api.get_profile(user_id)
+            _NAME_CACHE[user_id] = profile.display_name
+        except Exception as e:
+            print(f"[DoubleA] 取 LINE 名稱失敗：{e}")
+            return ""
+    return _NAME_CACHE[user_id]
+
+
+def _owner_pairs(rest: str) -> list[tuple[str, str]]:
+    """「+負責」後面的內容：一行一組「專案名稱 負責人」；負責人是最後一個詞，兩人合作寫「育鳳、蕙綺」。"""
+    pairs = []
+    for line in rest.splitlines():
+        line = re.sub(r"^\s*(?:\(?\d{1,3}[.、)．]|\d{1,3}\s|[①-⑳])\s*", "", line)  # 貼上時前面有編號就拿掉
+        parts = line.strip().rsplit(maxsplit=1)
+        if len(parts) == 2:
+            pairs.append((parts[0].strip(), parts[1].strip()))
+    return pairs
+
+
+def _owners_text() -> str:
+    """「👥 目前手上的專案」：每個人一段，專案前面加流水號；清單是空的就回空字串。"""
+    grouped = projects_by_owner()
+    if not grouped:
+        return ""
+    stale = stale_pairs(datetime.now(TAIPEI_TZ).date().isoformat())
+    lines = ["👥 目前手上的專案"]
+    for owner, projects in grouped.items():
+        lines.append(f"【{owner}】")
+        lines.extend(f"{i}. {project}" + ("　⚠️ 兩週沒回報" if (project, owner) in stale else "")
+                     for i, project in enumerate(projects, 1))
+    return "\n".join(lines)
+
+
+_REPORT_HEADER = re.compile(r"[【〔\[［(（]\s*([^】〕\]］)）]{1,8}?)\s*[】〕\]］)）]")
+
+
+def _members() -> list[str]:
+    """MEMBERS：公司群組成員的名字（逗號分隔），用來認週報是誰的。"""
+    return [m.strip() for m in os.environ.get("MEMBERS", "").split(",") if m.strip()]
+
+
+def _header_member(text: str) -> str | None:
+    """週報前兩行的【名字】〔名字〕，或整行就是名字。"""
+    members = _members()
+    for line in [x.strip() for x in text.splitlines() if x.strip()][:2]:
+        for m in _REPORT_HEADER.finditer(line):
+            if m.group(1).strip() in members:
+                return m.group(1).strip()
+        if line in members:
+            return line
+    return None
+
+
+def _looks_like_report(text: str) -> bool:
+    """像週報：至少 3 行，而且開頭有【名字】或前兩行提到「進度」。"""
+    lines = [x for x in text.splitlines() if x.strip()]
+    return len(lines) >= 3 and (_header_member(text) is not None or "進度" in "".join(lines[:2]))
+
+
+def _report_owner(text: str, display_name: str) -> str | None:
+    """週報是誰的：先看開頭的【名字】，沒有就看 LINE 名稱裡有沒有成員的名字。"""
+    return _header_member(text) or next((m for m in _members() if m in (display_name or "")), None)
+
+
+def process_report(text: str, chat_id: str, reply_token: str | None = None, user_id: str = "") -> None:
+    """同事貼週報（公司版）：抓出專案、更新這個人手上的專案，回一句確認；週報裡的日期不會建成行程。"""
+    owner = _report_owner(text, _display_name(chat_id, user_id))
+    if not owner:
+        _send_line_msg(chat_id, TextMessage(text="📝 看不出這是誰的週報，請在第一行寫【名字】，例如【淨雯】"), reply_token, [False])
+        return
+    projects = parse_report_projects(text)
+    if not projects:
+        print(f"[DoubleA] 週報沒有抓到專案：{owner}")
+        return
+    added = update_from_report(owner, projects, datetime.now(TAIPEI_TZ).date().isoformat())
+    msg = f"📝 已更新【{owner}】{len(projects)} 個專案" + (f"（新增：{'、'.join(added)}）" if added else "")
+    _send_line_msg(chat_id, TextMessage(text=msg), reply_token, [False])
+
+
+def _tag_event(ev: dict, text: str, chat_id: str, user_id: str) -> None:
+    """公司版（TAG_PROJECT_OWNER=true）：行程標題前加【專案｜負責人】。
+    專案：訊息裡有負責人清單上的專案就用它，否則用 AI 抓的 project；負責人：清單上的人，沒有就寫發問的人。"""
+    ai_project = (ev.pop("project", None) or "").strip()
+    if not _env_on("TAG_PROJECT_OWNER"):
+        return
+    owners = load_project_owners()
+    names = sorted(owners, key=len, reverse=True)
+    project = (next((p for p in names if p in (text or "")), None)
+               or next((p for p in names if ai_project and (p in ai_project or ai_project in p)), None)
+               or ai_project or None)
+    asker = _display_name(chat_id, user_id)
+    owner = owners.get(project or "") or asker
+    tag = "｜".join(x for x in (project, owner) if x)
+    if tag and not ev.get("title", "").startswith("【"):
+        ev["title"] = f"【{tag}】{ev.get('title', '')}"
+    ev["description"] = ((ev.get("description") or "") +
+                         f"\n\n專案：{project or '未標'}｜負責人：{owner or '未標'}｜發問：{asker or '未知'}").strip()
+
+
 def _invites_wife(chat_id: str) -> bool:
-    """群組／聊天室（C、R 開頭）建立的行程才邀請 Ginny；私訊（U 開頭）只寫自己的行事曆。"""
-    return chat_id.startswith(("C", "R"))
+    """群組／聊天室（C、R 開頭）建立的行程才邀請（對象見 invitees()，預設 Ginny）；私訊（U 開頭）只寫自己的行事曆。"""
+    return chat_id.startswith(("C", "R")) and bool(invitees())
 
 
 def _fix_event_times(ev: dict) -> None:
@@ -1589,7 +1853,7 @@ def _should_notify(text: str) -> bool:
 
 # ── Message processing ────────────────────────────────────────────────────────
 
-def process_message(text: str, chat_id: str, reply_token: str | None = None) -> None:
+def process_message(text: str, chat_id: str, reply_token: str | None = None, user_id: str = "") -> None:
     print(f"[DoubleA] 收到訊息：{text}")
     # 只記住群組/聊天室（C、R 開頭）；私訊（U 開頭）不覆蓋，避免排程推播被送到私訊
     if chat_id[:1] in ('C', 'R') or not load_chat_id():
@@ -1614,7 +1878,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
     # 圖片＋文字說明才觸發行事曆：
     # 剛剛有傳照片、且這則文字包含觸發語 → 用那張照片建立行程，其餘文字判斷都跳過。
     if _is_calendar_trigger(text) and load_pending_image(chat_id):
-        process_image_as_calendar(chat_id, reply_token, text)
+        process_image_as_calendar(chat_id, reply_token, text, user_id)
         return
 
     if handle_command(text, chat_id, reply_token):
@@ -1665,7 +1929,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
     #     會讓整個 process_message 崩潰，導致行事曆/待辦/天氣完全沒反應。
     # 最終回覆本來就會用免費的 reply_token 送出，因此這則「處理中」通知可省略。
 
-    result = parse_message(text, now)
+    result = parse_message(text, now, with_project=_env_on("TAG_PROJECT_OWNER"))
     # 防呆：AI 有時（尤其多行訊息）會回傳 list 而非 dict，
     # 若不處理，下一行的 result.get() 會 AttributeError 讓整個機器人沒反應。
     if isinstance(result, list):
@@ -1775,6 +2039,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
             ev = events[0]
             ev["description"] = text
             _fix_event_times(ev)
+            _tag_event(ev, text, chat_id, user_id)
             try:
                 created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
                 save_last_event(created["id"], ev)
@@ -1789,6 +2054,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None) -> 
             for ev in events:
                 ev["description"] = text
                 _fix_event_times(ev)
+                _tag_event(ev, text, chat_id, user_id)
                 try:
                     created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
                     save_last_event(created["id"], ev)
@@ -1901,6 +2167,8 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
     if chat_id[:1] in ('C', 'R') or not load_chat_id():
         save_chat_id(chat_id)
     save_pending_image(chat_id, message_id)
+    if not _feature_on("finance"):
+        return  # 沒開記帳：照片只留給「加到行事曆」用，不辨識收據、不回話
 
     _used_reply: list[bool] = [False]
 
@@ -1957,7 +2225,7 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
 
 
 def process_image_as_calendar(
-    chat_id: str, reply_token: str | None = None, trigger_text: str | None = None
+    chat_id: str, reply_token: str | None = None, trigger_text: str | None = None, user_id: str = ""
 ) -> None:
     """使用者傳完照片後接著輸入「加到行事曆」等觸發語 → 才真正解析圖片並建立行程。
 
@@ -2024,6 +2292,7 @@ def process_image_as_calendar(
     if len(events) == 1:
         ev = events[0]
         _fix_event_times(ev)
+        _tag_event(ev, trigger_text or "", chat_id, user_id)
         try:
             created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
             save_last_event(created["id"], ev)
@@ -2038,6 +2307,7 @@ def process_image_as_calendar(
         succeeded, failed = [], []
         for ev in events:
             _fix_event_times(ev)
+            _tag_event(ev, trigger_text or "", chat_id, user_id)
             try:
                 created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
                 save_last_event(created["id"], ev)
@@ -2130,14 +2400,28 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 # 家人用習慣是直接回覆或直接說話，因此改為群組訊息一律處理；
                 # 若訊息剛好還是包含手打的標籤文字，先把它拿掉再往下走，
                 # 避免標籤文字干擾 AI 判斷或關鍵字比對。
+                # 公司版（GROUP_TRIGGER）：用 LINE 標註選到小幫手也算有叫它
+                mentioned = False
+                if _group_trigger():
+                    text, mentioned = _strip_self_mentions(msg.get("text", ""), msg)
                 if BOT_MENTION.lower() in text.lower():
+                    mentioned = True
                     text = re.sub(re.escape(BOT_MENTION), "", text, flags=re.IGNORECASE).strip()
                 if not text:
+                    if not (mentioned and _group_trigger()):
+                        continue
+                    text = "選單"
+            if _env_on("TAG_PROJECT_OWNER") and _members() and _looks_like_report(text):
+                background_tasks.add_task(process_report, text, chat_id, reply_token, source.get("userId", ""))
+                continue
+            if source_type in ("group", "room"):
+                text = _addressed_text(text, chat_id, mentioned)
+                if text is None:
                     continue
-            if _is_bible_reading_cmd(text):
+            if _feature_on("bible") and _is_bible_reading_cmd(text):
                 background_tasks.add_task(process_bible_reading, source.get("userId", ""), chat_id, reply_token)
                 continue
-            background_tasks.add_task(process_message, text, chat_id, reply_token)
+            background_tasks.add_task(process_message, text, chat_id, reply_token, source.get("userId", ""))
         elif msg.get("type") == "image":
             message_id = msg.get("id", "")
             if message_id:
@@ -2270,7 +2554,7 @@ def _reauth_page(token: str, notice: str = "") -> str:
     tok = urllib.parse.quote(token)
     return f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>重新授權 Google｜培正家AI小幫手</title>
+<title>重新授權 Google｜{BOT_NAME}</title>
 <style>body{{font-family:sans-serif;max-width:640px;margin:32px auto;padding:0 16px;line-height:1.7}}
 .btn{{display:inline-block;background:#0f6b5c;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none}}
 textarea{{width:100%;min-height:90px;font-size:14px}} button{{font-size:16px;padding:8px 18px}}
