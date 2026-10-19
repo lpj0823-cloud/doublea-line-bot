@@ -27,8 +27,12 @@ from linebot.v3.messaging import (
     PushMessageRequest,
     QuickReply,
     QuickReplyItem,
+    AllMentionTarget,
+    MentionSubstitutionObject,
     ReplyMessageRequest,
     TextMessage,
+    TextMessageV2,
+    ValidateMessageRequest,
 )
 
 from calendar_service import (
@@ -690,6 +694,24 @@ def morning_digest_job() -> None:
         print(f"[DoubleA] 早安摘要推播失敗：{e}")
 
 
+def _weekly_messages(chat_id: str) -> list:
+    """每週推播的對話框（最多 5 個）；推到群組（C、R 開頭）時第一個對話框前面 @所有人（WEEKLY_PUSH_MENTION_ALL=false 可關）。"""
+    msg = os.environ.get("WEEKLY_PUSH_TEXT", "").strip().replace("\\n", "\n")
+    owners = _owners_text() if _env_on("TAG_PROJECT_OWNER") else ""
+    bubbles = _chunk_text(msg + ("\n\n" + owners if owners else ""))[:5]
+    messages: list = [TextMessage(text=b) for b in bubbles]
+    if bubbles and chat_id[:1] in ("C", "R") and _env_on("WEEKLY_PUSH_MENTION_ALL", "true"):
+        first = bubbles[0].replace("{", "{{").replace("}", "}}")  # textV2 的 { } 是佔位符，原文的要跳脫
+        messages[0] = TextMessageV2(text="{everyone} " + first,
+                                    substitution={"everyone": MentionSubstitutionObject(mentionee=AllMentionTarget())})
+    return messages
+
+
+def _push_messages(chat_id: str, messages: list) -> None:
+    with ApiClient(line_config) as api_client:
+        MessagingApi(api_client).push_message(PushMessageRequest(to=chat_id, messages=messages))
+
+
 def weekly_push_job() -> None:
     """（選用）每週固定推播一則（WEEKLY_PUSH_AT＋WEEKLY_PUSH_TEXT），例如週一 08:30 提醒交專案進度表。"""
     chat_id = _push_target()
@@ -697,12 +719,31 @@ def weekly_push_job() -> None:
         print("[DoubleA] 每週推播：找不到 chat_id，略過")
         return
     try:
-        msg = os.environ.get("WEEKLY_PUSH_TEXT", "").strip().replace("\\n", "\n")
-        owners = _owners_text() if _env_on("TAG_PROJECT_OWNER") else ""
-        _push_bundle(chat_id, [msg + ("\n\n" + owners if owners else "")])
+        _push_messages(chat_id, _weekly_messages(chat_id))
         print("[DoubleA] 每週推播已發送")
     except Exception as e:
         print(f"[DoubleA] 每週推播失敗：{e}")
+
+
+def _weekly_test_text() -> str:
+    """「測試週一推播」：私訊看週一要推到群組的內容，並請 LINE 驗證格式（validate，不會真的發出去）。"""
+    target = _push_target()
+    if not _weekly_push_at() or not target:
+        return "⚠️ 每週推播還沒設好：要有 WEEKLY_PUSH_AT、WEEKLY_PUSH_TEXT 和 PUSH_CHAT_ID。"
+    msgs = _weekly_messages(target)
+    try:
+        with ApiClient(line_config) as api_client:
+            MessagingApi(api_client).validate_push(ValidateMessageRequest(messages=msgs))
+        check = "✅ LINE 驗證通過" + ("，會 @所有人" if isinstance(msgs[0], TextMessageV2) else "（不會 @所有人）")
+    except Exception as e:
+        check = f"❌ LINE 驗證沒過：{str(e)[:150]}"
+    job = next((j for j in scheduler.get_jobs() if j.func is weekly_push_job), None)
+    nrt = job.next_run_time if job else None
+    when = f"{nrt:%-m/%-d}（{'一二三四五六日'[nrt.weekday()]}）{nrt:%H:%M}" if nrt else "沒有排到，請傳「自我檢查」"
+    where = "公司群組" if target in _allowed_groups() else ("群組" if target[:1] in ("C", "R") else "私訊")
+    preview = "\n".join(m.text.replace("{everyone}", "@所有人").replace("{{", "{").replace("}}", "}") for m in msgs)
+    return (f"🧪 週一推播測試（只私訊你，不會發到群組）\n\n⏰ 下次自動推播：{when}\n📍 推到：{where}\n{check}\n\n"
+            f"── 到時候群組會收到 ──\n{preview}")
 
 
 def evening_digest_job() -> None:
@@ -1101,6 +1142,7 @@ _EXACT_ALIASES: dict[str, tuple[str, ...]] = {
     "群組ID": ("群組id", "chatid", "群組編號", "聊天室id", "群組代號"),
     "重新授權": ("重新授權", "授權", "google授權", "重新登入", "reauth"),
     "自我檢查": ("自我檢查", "自檢", "健康檢查", "系統檢查", "檢查功能", "selftest"),
+    "測試週一推播": ("測試週一推播", "測試推播", "推播測試", "測試週報推播", "測試每週推播"),
 }
 _ALIAS_LOOKUP = {a.lower(): canon for canon, alts in _EXACT_ALIASES.items() for a in alts}
 # 別名本身含「查、看、的…」這類贅字時，比對前會被去掉，所以也登記去掉贅字後的版本
@@ -1141,7 +1183,7 @@ def _canonicalize(text: str) -> tuple[str, bool]:
     if t.startswith("+"):
         return t, False
 
-    clean = _FILLER_RE.sub("", _PUNCT_RE.sub("", t)).lower()
+    clean = _FILLER_RE.sub("", _PUNCT_RE.sub("", t)).lower().replace("周", "週")  # 「周」「週」常混用，指令都認得
     if clean in _ALIAS_LOOKUP and len(t) <= 14:
         return _ALIAS_LOOKUP[clean], False
 
@@ -1250,6 +1292,11 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
             f"{_public_base_url()}/reauth?token={nonce}\n\n"
             "用電腦或手機瀏覽器打開，照頁面上 ①～④ 步驟完成即可。"
         )
+        return True
+
+    # 「測試週一推播」= 私訊看週一推播的內容與 LINE 驗證結果（群組裡不測，免得吵到同事）
+    if text.strip() == "測試週一推播":
+        _respond("🔒 請私訊我「測試週一推播」，不會在群組裡發。" if chat_id[:1] in ("C", "R") else _weekly_test_text())
         return True
 
     # 「自我檢查」= 逐項檢查 Google、LINE 額度、天氣、餐廳、資料保存、排程
