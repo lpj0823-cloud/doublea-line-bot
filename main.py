@@ -1670,6 +1670,7 @@ def _owner_pairs(rest: str) -> list[tuple[str, str]]:
     """「+負責」後面的內容：一行一組「專案名稱 負責人」；負責人是最後一個詞，兩人合作寫「育鳳、蕙綺」。"""
     pairs = []
     for line in rest.splitlines():
+        line = re.sub(r"^\s*(?:\(?\d{1,3}[.、)．]|\d{1,3}\s|[①-⑳])\s*", "", line)  # 貼上時前面有編號就拿掉
         parts = line.strip().rsplit(maxsplit=1)
         if len(parts) == 2:
             pairs.append((parts[0].strip(), parts[1].strip()))
@@ -1677,11 +1678,15 @@ def _owner_pairs(rest: str) -> list[tuple[str, str]]:
 
 
 def _owners_text() -> str:
-    """「👥 目前手上的專案」：一人一行；清單是空的就回空字串。"""
+    """「👥 目前手上的專案」：每個人一段，專案前面加流水號；清單是空的就回空字串。"""
     grouped = projects_by_owner()
     if not grouped:
         return ""
-    return "👥 目前手上的專案\n" + "\n".join(f"・{owner}：{'、'.join(projects)}" for owner, projects in grouped.items())
+    lines = ["👥 目前手上的專案"]
+    for owner, projects in grouped.items():
+        lines.append(f"【{owner}】")
+        lines.extend(f"{i}. {project}" for i, project in enumerate(projects, 1))
+    return "\n".join(lines)
 
 
 def _tag_event(ev: dict, text: str, chat_id: str, user_id: str) -> None:
