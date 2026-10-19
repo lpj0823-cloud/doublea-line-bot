@@ -885,9 +885,18 @@ def _t(title: str) -> str:
     return title if str(title).startswith("【") else f"【{title}】"
 
 
+def _when(ev: dict) -> str:
+    """確認訊息的時間；整天的行程寫「10月23日（整天）」，跨天寫「10月24日～10月26日（整天）」。"""
+    start_dt = datetime.fromisoformat(ev["start"])
+    if not ev.get("all_day"):
+        return start_dt.strftime("%-m月%-d日 %H:%M")
+    end_dt = datetime.fromisoformat(ev["end"])
+    last = f"～{end_dt.strftime('%-m月%-d日')}" if end_dt.date() > start_dt.date() else ""
+    return f"{start_dt.strftime('%-m月%-d日')}{last}（整天）"
+
+
 def _format_calendar_confirmation(event_data: dict, event_link: str, invited: bool = True) -> str:
-    start_dt = datetime.fromisoformat(event_data["start"])
-    date_str = start_dt.strftime("%-m月%-d日 %H:%M")
+    date_str = _when(event_data)
     loc = event_data.get("location")
     location_line = f"\n📍 {loc}" if (loc and loc != "null") else ""
     link_line = f"\n\n🔗 {event_link}" if event_link else ""
@@ -908,8 +917,7 @@ def _format_multi_calendar_confirmation(results: list[dict], invited: bool = Tru
     lines = [f"📅 已加入 {count} 個行事曆！\n"]
     for i, r in enumerate(results, 1):
         ev = r["event_data"]
-        start_dt = datetime.fromisoformat(ev["start"])
-        date_str = start_dt.strftime("%-m月%-d日 %H:%M")
+        date_str = _when(ev)
         loc = ev.get("location")
         loc_part = f" 📍{loc}" if (loc and loc != "null") else ""
         lines.append(f"{i}.{_t(ev['title'])}{date_str}{loc_part}")
@@ -1796,9 +1804,14 @@ def _looks_like_report(text: str) -> bool:
     return len(lines) >= 3 and (_header_member(text) is not None or "進度" in "".join(lines[:2]))
 
 
+def _member_in(name: str) -> str | None:
+    """LINE 名稱裡有 MEMBERS 的名字就回那個名字（例：淨雯（柏言/禹成）→ 淨雯）。"""
+    return next((m for m in sorted(_members(), key=len, reverse=True) if m in (name or "")), None)
+
+
 def _report_owner(text: str, display_name: str) -> str | None:
     """週報是誰的：先看開頭的【名字】，沒有就看 LINE 名稱裡有沒有成員的名字。"""
-    return _header_member(text) or next((m for m in _members() if m in (display_name or "")), None)
+    return _header_member(text) or _member_in(display_name)
 
 
 def process_report(text: str, chat_id: str, reply_token: str | None = None, user_id: str = "") -> None:
@@ -1818,8 +1831,11 @@ def process_report(text: str, chat_id: str, reply_token: str | None = None, user
 
 # 公司日曆的顏色習慣（10/19 淨雯在群組說明，也對照過公司日曆的舊行程）：紅＝會議、藍＝員工出席、綠＝出差
 _COLOR_MEETING, _COLOR_STAFF, _COLOR_TRIP = "11", "7", "2"  # Google 日曆的番茄紅、孔雀藍、鼠尾草綠
-_STAFF_WORDS = ("休假", "請假", "特休", "病假", "事假", "補休", "公假", "喪假", "婚假", "產假", "陪產",
-                "育嬰", "健檢", "體檢", "放假", "颱風假", "停班", "聚餐", "尾牙", "春酒", "員工旅遊")
+_LEAVE_WORDS = ("休假", "請假", "特休", "病假", "事假", "補休", "公假", "喪假", "婚假", "產假", "陪產",
+                "育嬰", "健檢", "體檢")  # 個人的：標題開頭沒寫是誰，就補發問的人
+_PARTY_WORDS = ("聚餐", "尾牙", "春酒")  # 有時間的聚會，不建成整天
+_STAFF_WORDS = _LEAVE_WORDS + _PARTY_WORDS + ("放假", "颱風假", "停班", "員工旅遊")
+_HAS_TIME = re.compile(r"[0-9０-９一二三四五六七八九十兩]\s*[點時:：]|[上下]午|早上|中午|晚上|傍晚|凌晨|半天")
 
 
 def _event_colors_on() -> bool:
@@ -1832,39 +1848,72 @@ def _event_colors_on() -> bool:
     return BOT_NAME != "培正家AI小幫手"
 
 
+def _event_kind(title: str) -> str:
+    """出差→trip，請假／休假／健檢／聚餐這類員工出席→staff，其他（會議、案場行程）→meeting。"""
+    if "出差" in title:
+        return "trip"
+    if any(w in title for w in _STAFF_WORDS):
+        return "staff"
+    return "meeting"
+
+
 def _event_color(title: str) -> str | None:
-    """照標題上色：出差→綠，請假／休假／健檢／聚餐這類員工出席→藍，其他（會議、案場行程）→紅。"""
+    """照同事的顏色習慣上色：出差→綠，員工出席→藍，其他→紅。"""
     if not _event_colors_on():
         return None
-    if "出差" in title:
-        return _COLOR_TRIP
-    if any(w in title for w in _STAFF_WORDS):
-        return _COLOR_STAFF
-    return _COLOR_MEETING
+    return {"trip": _COLOR_TRIP, "staff": _COLOR_STAFF}.get(_event_kind(title), _COLOR_MEETING)
+
+
+def _leave_style(ev: dict, text: str, asker: str | None, all_day) -> None:
+    """請假、出差這類照同事的習慣：標題寫「淨雯請假」「培安出差 / 屏東利宅」，不加【】；
+    標題開頭就是「請假」「出差」（沒寫是誰）就補發問的人；沒說幾點就建成整天（聚餐這類除外）。"""
+    title = ev.get("title", "")
+    if asker and title.startswith(_LEAVE_WORDS + ("出差",)) and not _member_in(title):
+        ev["title"] = asker + title
+    if all_day is None:  # AI 沒判斷就看訊息裡有沒有時間
+        all_day = bool(text) and not _HAS_TIME.search(text)
+    elif isinstance(all_day, str):
+        all_day = all_day.strip().lower() == "true"
+    if not all_day or any(w in title for w in _PARTY_WORDS):
+        return
+    try:
+        start, end = datetime.fromisoformat(ev["start"]), datetime.fromisoformat(ev["end"])
+    except (KeyError, ValueError):
+        return
+    ev["all_day"] = True
+    if end.strftime("%H:%M") == "00:00" and end.date() > start.date():
+        ev["end"] = (end - timedelta(minutes=1)).isoformat()  # 結束在半夜 12 點＝前一天就結束
 
 
 def _tag_event(ev: dict, text: str, chat_id: str, user_id: str) -> None:
     """公司版（TAG_PROJECT_OWNER=true）：行程標題前加【專案｜負責人】。
     專案：訊息裡有負責人清單上的專案就用它，否則用 AI 抓的 project；負責人：清單上的人，沒有就寫發問的人。
-    公司版也照同事的顏色習慣上色（_event_color）。"""
+    有設 MEMBERS 時名字只用名單上的（LINE 名稱「淨雯（柏言/禹成）」→ 淨雯），對不到就不寫名字。
+    公司版也照同事的習慣：上色（_event_color）；請假、出差不加【】、沒說幾點就建成整天（_leave_style）。"""
     ai_project = (ev.pop("project", None) or "").strip()
+    all_day = ev.pop("all_day", None)
     color = _event_color(ev.get("title", ""))
     if color:
         ev["color"] = color
     if not _env_on("TAG_PROJECT_OWNER"):
+        return
+    display = _display_name(chat_id, user_id)
+    asker = _member_in(display) if _members() else display
+    if _event_kind(ev.get("title", "")) != "meeting":
+        _leave_style(ev, text, asker, all_day)
+        ev["description"] = ((ev.get("description") or "") + f"\n\n發問：{asker or display or '未知'}").strip()
         return
     owners = load_project_owners()
     names = sorted(owners, key=len, reverse=True)
     project = (next((p for p in names if p in (text or "")), None)
                or next((p for p in names if ai_project and (p in ai_project or ai_project in p)), None)
                or ai_project or None)
-    asker = _display_name(chat_id, user_id)
     owner = owners.get(project or "") or asker
     tag = "｜".join(x for x in (project, owner) if x)
     if tag and not ev.get("title", "").startswith("【"):
         ev["title"] = f"【{tag}】{ev.get('title', '')}"
     ev["description"] = ((ev.get("description") or "") +
-                         f"\n\n專案：{project or '未標'}｜負責人：{owner or '未標'}｜發問：{asker or '未知'}").strip()
+                         f"\n\n專案：{project or '未標'}｜負責人：{owner or '未標'}｜發問：{asker or display or '未知'}").strip()
 
 
 def _invites_wife(chat_id: str) -> bool:

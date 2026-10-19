@@ -402,6 +402,14 @@ def create_calendar_event(event_data: dict, invite_wife: bool = True) -> dict:
     if event_data.get("color"):
         body["colorId"] = event_data["color"]
 
+    if event_data.get("all_day"):
+        # 整天的行程（同事請假、出差的習慣）：只寫日期，結束日寫隔天（Google 的規定），顯示為「有空」
+        first = event_data["start"][:10]
+        last = max(event_data["end"][:10], first)
+        body["start"] = {"date": first}
+        body["end"] = {"date": (datetime.fromisoformat(last) + timedelta(days=1)).date().isoformat()}
+        body["transparency"] = "transparent"
+
     result = (
         service.events()
         .insert(calendarId=CALENDAR_ID, body=body, sendUpdates="all")

@@ -37,9 +37,11 @@ def parse_message(message: str, current_time: datetime, with_project: bool = Fal
     }
     weekday_zh = weekday_map.get(current_time.strftime("%A"), "")
     now_str = current_time.strftime(f"%Y-%m-%d %H:%M {weekday_zh}")
-    # 公司版（with_project）：行程多一個 project 欄位，給標題加【專案｜負責人】用
-    project_field = ', "project": null' if with_project else ""
-    project_rule = "- project：訊息裡提到的專案或案場名稱（例如 淡水林宅、依玲家），沒有就 null\n" if with_project else ""
+    # 公司版（with_project）：行程多 project（給標題加【專案｜負責人】）與 all_day（請假、出差沒說幾點就建成整天）
+    project_field = ', "project": null, "all_day": false' if with_project else ""
+    project_rule = ("- project：訊息裡提到的專案或案場名稱（例如 淡水林宅、依玲家），沒有就 null\n"
+                    "- all_day：這筆行程沒說幾點（只有日期），或說整天、全天時為 true；有說幾點、上午、下午、半天時為 false\n"
+                    ) if with_project else ""
 
     prompt = f"""現在時間：{now_str}（台北時間，UTC+8）
 
