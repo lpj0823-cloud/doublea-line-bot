@@ -2440,6 +2440,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="Invalid body")
 
     for event in payload.get("events", []):
+        if event.get("type") == "join":  # 被拉進群組：只把群組 ID 記在日誌，不在群組裡講話
+            src = event.get("source", {})
+            print(f"[DoubleA] 加入群組，群組 ID：{src.get('groupId') or src.get('roomId', '')}")
+            continue
         if event.get("type") != "message":
             continue
         msg = event.get("message", {})
