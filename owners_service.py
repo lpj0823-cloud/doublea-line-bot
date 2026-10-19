@@ -1,6 +1,7 @@
 """公司版：專案 → 負責人清單（存在 DATA_DIR/project_owners.json）。
 在 LINE 用「+負責 淡水林宅 淨雯」新增、「負責清單」查看、「刪負責 淡水林宅」刪除。"""
 import json
+import re
 
 from paths import data_path
 
@@ -35,9 +36,13 @@ def remove_project_owner(project: str) -> bool:
     return True
 
 
+_OWNER_SPLIT = re.compile(r"[、,，/／]")
+
+
 def projects_by_owner() -> dict[str, list[str]]:
-    """每個人手上的專案（照加入順序）：{負責人: [專案, ...]}。"""
+    """每個人手上的專案（照加入順序）：{負責人: [專案, ...]}；兩人合作寫「育鳳、蕙綺」，兩人底下都會列。"""
     grouped: dict[str, list[str]] = {}
     for project, owner in load_project_owners().items():
-        grouped.setdefault(owner, []).append(project)
+        for name in filter(None, (n.strip() for n in _OWNER_SPLIT.split(owner))):
+            grouped.setdefault(name, []).append(project)
     return grouped

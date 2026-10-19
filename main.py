@@ -1096,12 +1096,16 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
     # ── 專案負責人清單（公司版，TAG_PROJECT_OWNER=true）──────────────────────────
     if _env_on("TAG_PROJECT_OWNER"):
         if text.startswith("+負責"):
-            parts = text[len("+負責"):].split()
-            if len(parts) == 2:
-                set_project_owner(parts[0], parts[1])
-                _respond(f"✅ 已記下：{parts[0]} → {parts[1]}\n之後提到「{parts[0]}」的行程，標題會加【{parts[0]}｜{parts[1]}】")
+            pairs = _owner_pairs(text[len("+負責"):])
+            for project, owner in pairs:
+                set_project_owner(project, owner)
+            if len(pairs) == 1:
+                project, owner = pairs[0]
+                _respond(f"✅ 已記下：{project} → {owner}\n之後提到「{project}」的行程，標題會加【{project}｜{owner}】")
+            elif pairs:
+                _respond(f"✅ 已記下 {len(pairs)} 個專案：\n" + "\n".join(f"・{p} → {o}" for p, o in pairs))
             else:
-                _respond("❓ 格式：+負責 專案名稱 負責人\n例：+負責 淡水林宅 淨雯")
+                _respond("❓ 格式：+負責 專案名稱 負責人\n一次加很多：第一行「+負責」，下面每行「專案名稱 負責人」\n例：+負責 淡水林宅 淨雯")
             return True
         if text.strip() in ("負責清單", "負責人清單", "專案負責人", "手上的專案", "誰負責什麼"):
             _respond(_owners_text() or "👥 還沒有專案負責人清單\n用「+負責 淡水林宅 淨雯」新增")
@@ -1660,6 +1664,16 @@ def _display_name(chat_id: str, user_id: str) -> str:
             print(f"[DoubleA] 取 LINE 名稱失敗：{e}")
             return ""
     return _NAME_CACHE[user_id]
+
+
+def _owner_pairs(rest: str) -> list[tuple[str, str]]:
+    """「+負責」後面的內容：一行一組「專案名稱 負責人」；負責人是最後一個詞，兩人合作寫「育鳳、蕙綺」。"""
+    pairs = []
+    for line in rest.splitlines():
+        parts = line.strip().rsplit(maxsplit=1)
+        if len(parts) == 2:
+            pairs.append((parts[0].strip(), parts[1].strip()))
+    return pairs
 
 
 def _owners_text() -> str:
