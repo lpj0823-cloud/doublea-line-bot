@@ -240,6 +240,10 @@ gcloud scheduler jobs create http doublea-check-reminders \
 | `GOOGLE_TOKEN_JSON` | Google OAuth token（base64，由 auth_setup.py 產生） |
 | `INVITE_EMAILS` | （選用）群組建立的行程要邀請誰，逗號分隔；`none`＝不邀請；沒設＝家用版預設 |
 | `BOT_NAME` | （選用）機器人自稱的名字，出現在「選單」和重新授權頁；沒設＝培正家AI小幫手 |
+| `FEATURES_OFF` | （選用）關掉的功能，逗號分隔：birthday、finance、restaurant、proverb、bible；沒設＝全開 |
+| `ENABLE_MORNING_PUSH` | （選用）每天 07:00 早安摘要，預設開；設 `false` 關掉 |
+| `WEEKLY_PUSH_AT`、`WEEKLY_PUSH_TEXT` | （選用）每週固定推播一則，例如 `mon 08:30`＋提醒文字（`\n` 換行）；兩個都設才會推 |
+| `TAG_PROJECT_OWNER` | （選用）`true`＝行程標題加【專案｜負責人】：負責人清單用「+負責 專案 負責人」管理，清單沒有就寫發問的人 |
 
 ---
 
