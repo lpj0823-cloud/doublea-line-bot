@@ -91,6 +91,29 @@ target_datetime = 原本活動的時間（不知道幾點就用當天 09:00 並�
         return {"type": "ignore"}
 
 
+def parse_report_projects(report: str) -> list[str]:
+    """同事在群組貼的工作週報 → 專案名稱清單（照出現順序）；失敗回空清單。"""
+    prompt = f"""這是一位同事在 LINE 群組貼的工作週報。列出裡面每一個專案（案場）的名稱，照出現順序。
+規則：
+- 只要專案名稱，不要工作項目、日期、百分比、人名
+- 「其他」「雜項」這類不是專案，不要列
+- 名稱照原文，去掉前面的符號（✔、💡、'、-、編號）和後面的「：50%」
+- 只回傳 JSON：{{"projects": ["名稱", ...]}}，不要加任何說明或```符號
+
+週報：
+{report}"""
+    try:
+        text = _call_claude(prompt)
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        data = json.loads(text.strip())
+        return [p.strip() for p in data.get("projects", []) if isinstance(p, str) and p.strip()]
+    except Exception:
+        return []
+
+
 def parse_new_datetime(text: str, current_time: datetime) -> str | None:
     now_str = current_time.strftime("%Y-%m-%d %H:%M")
     prompt = f"""現在時間：{now_str}（台北時間 UTC+8）

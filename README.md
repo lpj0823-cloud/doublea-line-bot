@@ -244,6 +244,8 @@ gcloud scheduler jobs create http doublea-check-reminders \
 | `ENABLE_MORNING_PUSH` | （選用）每天 07:00 早安摘要，預設開；設 `false` 關掉 |
 | `WEEKLY_PUSH_AT`、`WEEKLY_PUSH_TEXT` | （選用）每週固定推播一則，例如 `mon 08:30`＋提醒文字（`\n` 換行）；兩個都設才會推 |
 | `TAG_PROJECT_OWNER` | （選用）`true`＝行程標題加【專案｜負責人】：負責人清單用「+負責 專案 負責人」管理，清單沒有就寫發問的人；每週推播會附上「每個人手上的專案」 |
+| `GROUP_TRIGGER` | （選用）群組裡句子開頭要打這個詞才處理（例 `小幫手`），或用 LINE 標註小幫手；+記、+買、待辦這類指令不用叫；沒設＝每句都讀 |
+| `MEMBERS` | （選用）公司成員名字，逗號分隔（例 `培正,培安,淨雯,蕙綺,育鳳`）；搭配 `TAG_PROJECT_OWNER`，同事貼週報會自動更新手上的專案 |
 
 ---
 

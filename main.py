@@ -36,7 +36,9 @@ from calendar_service import (
     update_calendar_event, update_event_field_by_id,
 )
 from weather_service import get_current_weather, get_daily_forecast
-from event_parser import parse_image_for_event, parse_message, parse_modification, parse_new_datetime
+from event_parser import (
+    parse_image_for_event, parse_message, parse_modification, parse_new_datetime, parse_report_projects,
+)
 from state_service import (
     add_reminder,
     clear_pending_edit,
@@ -69,7 +71,9 @@ from shopping_service import (
     mark_done_by_keyword,
 )
 from notes_service import add_note, delete_note_by_index, get_notes
-from owners_service import load_project_owners, projects_by_owner, remove_project_owner, set_project_owner
+from owners_service import (
+    load_project_owners, projects_by_owner, remove_project_owner, set_project_owner, stale_pairs, update_from_report,
+)
 from proverbs_service import get_todays_proverbs, get_proverbs_header, get_daily_verses
 from bible_plan_service import get_daily_reading, allowed_user_ids
 from rate_limiter import check_rate_limit
@@ -154,6 +158,43 @@ _FEATURE_PREFIXES = {
 def _feature_off_command(text: str) -> bool:
     t = text.strip()
     return any(t.startswith(p) for f, ps in _FEATURE_PREFIXES.items() if not _feature_on(f) for p in ps)
+
+
+def _group_trigger() -> str:
+    """GROUP_TRIGGER：群組裡句子開頭要先叫它（例如「小幫手」）才處理；沒設＝每句都讀（家用版）。"""
+    return os.environ.get("GROUP_TRIGGER", "").strip()
+
+
+# 群組裡不用叫也會處理的指令（看標準化後的文字）
+_NO_TRIGGER_COMMANDS = {"待辦", "購物清單", "筆記", "清除已買", "刪除行程", "修改行程", "選單", "群組ID", "自我檢查",
+                        "重新授權", "負責清單", "負責人清單", "專案負責人", "手上的專案", "誰負責什麼",
+                        "今天天氣", "明天天氣", "這週天氣", "天氣"}
+_NO_TRIGGER_PREFIX = re.compile(r"^(?:\+|刪筆記\s*\d|del\s*\d|買到\s*\d|刪負責\s)")
+
+
+def _addressed_text(text: str, chat_id: str, mentioned: bool) -> str | None:
+    """群組訊息是不是在叫小幫手：是就回要處理的文字，不是回 None（不處理、不花 AI）。"""
+    trigger = _group_trigger()
+    if not trigger or mentioned:
+        return text
+    if text.startswith(trigger):
+        return text[len(trigger):].lstrip(" ，,：:、　") or "選單"
+    canon, _ = _canonicalize(text)
+    if canon in _NO_TRIGGER_COMMANDS or _NO_TRIGGER_PREFIX.match(canon):
+        return text
+    if load_pending_edit(chat_id) or (load_pending_image(chat_id) and _is_calendar_trigger(text)):
+        return text  # 正在選單操作、或傳完照片要加行事曆：下一句不用再叫
+    return None
+
+
+def _strip_self_mentions(raw: str, msg: dict) -> tuple[str, bool]:
+    """拿掉 LINE 標註裡的「@小幫手」，回傳 (文字, 有沒有標註小幫手)。"""
+    found = False
+    for m in sorted((msg.get("mention") or {}).get("mentionees", []), key=lambda m: m.get("index", 0), reverse=True):
+        if m.get("isSelf"):
+            i, n = m.get("index", 0), m.get("length", 0)
+            raw, found = raw[:i] + raw[i + n:], True
+    return raw.strip(), found
 
 
 _WEEKDAYS = {"mon": "一", "tue": "二", "wed": "三", "thu": "四", "fri": "五", "sat": "六", "sun": "日"}
@@ -969,7 +1010,9 @@ def _menu_text() -> str:
     ]
     return (
         f"{'🙏 平安！' if _feature_on('proverb') else '👋 您好！'}我是{BOT_NAME}。\n"
-        "以下功能隨時傳訊息給我就能用：\n\n"
+        + (f"群組裡句子開頭打「{_group_trigger()}」我才會處理（私訊直接講）；+記、+買、待辦這類指令不用叫：\n\n"
+           if _group_trigger() else "以下功能隨時傳訊息給我就能用：\n\n")
+        +
         "📅 行事曆\n"
         "・「明天下午3點開會」→ 自動加入\n"
         "・「今天有什麼行程」「這週有什麼」→ 查詢\n"
@@ -983,6 +1026,8 @@ def _menu_lines(lines: list[tuple[str, str]]) -> list[str]:
     shown = [text for feature, text in lines if not feature or _feature_on(feature)]
     if _env_on("TAG_PROJECT_OWNER"):
         shown.insert(3, "👥 專案負責人：「+負責 淡水林宅 淨雯」；「負責清單」；「刪負責 淡水林宅」")
+        if _members():
+            shown.append("📝 週報：第一行寫【名字】貼在群組，我會自動更新你手上的專案")
     return shown
 
 
@@ -1682,11 +1727,59 @@ def _owners_text() -> str:
     grouped = projects_by_owner()
     if not grouped:
         return ""
+    stale = stale_pairs(datetime.now(TAIPEI_TZ).date().isoformat())
     lines = ["👥 目前手上的專案"]
     for owner, projects in grouped.items():
         lines.append(f"【{owner}】")
-        lines.extend(f"{i}. {project}" for i, project in enumerate(projects, 1))
+        lines.extend(f"{i}. {project}" + ("　⚠️ 兩週沒回報" if (project, owner) in stale else "")
+                     for i, project in enumerate(projects, 1))
     return "\n".join(lines)
+
+
+_REPORT_HEADER = re.compile(r"[【〔\[［(（]\s*([^】〕\]］)）]{1,8}?)\s*[】〕\]］)）]")
+
+
+def _members() -> list[str]:
+    """MEMBERS：公司群組成員的名字（逗號分隔），用來認週報是誰的。"""
+    return [m.strip() for m in os.environ.get("MEMBERS", "").split(",") if m.strip()]
+
+
+def _header_member(text: str) -> str | None:
+    """週報前兩行的【名字】〔名字〕，或整行就是名字。"""
+    members = _members()
+    for line in [x.strip() for x in text.splitlines() if x.strip()][:2]:
+        for m in _REPORT_HEADER.finditer(line):
+            if m.group(1).strip() in members:
+                return m.group(1).strip()
+        if line in members:
+            return line
+    return None
+
+
+def _looks_like_report(text: str) -> bool:
+    """像週報：至少 3 行，而且開頭有【名字】或前兩行提到「進度」。"""
+    lines = [x for x in text.splitlines() if x.strip()]
+    return len(lines) >= 3 and (_header_member(text) is not None or "進度" in "".join(lines[:2]))
+
+
+def _report_owner(text: str, display_name: str) -> str | None:
+    """週報是誰的：先看開頭的【名字】，沒有就看 LINE 名稱裡有沒有成員的名字。"""
+    return _header_member(text) or next((m for m in _members() if m in (display_name or "")), None)
+
+
+def process_report(text: str, chat_id: str, reply_token: str | None = None, user_id: str = "") -> None:
+    """同事貼週報（公司版）：抓出專案、更新這個人手上的專案，回一句確認；週報裡的日期不會建成行程。"""
+    owner = _report_owner(text, _display_name(chat_id, user_id))
+    if not owner:
+        _send_line_msg(chat_id, TextMessage(text="📝 看不出這是誰的週報，請在第一行寫【名字】，例如【淨雯】"), reply_token, [False])
+        return
+    projects = parse_report_projects(text)
+    if not projects:
+        print(f"[DoubleA] 週報沒有抓到專案：{owner}")
+        return
+    added = update_from_report(owner, projects, datetime.now(TAIPEI_TZ).date().isoformat())
+    msg = f"📝 已更新【{owner}】{len(projects)} 個專案" + (f"（新增：{'、'.join(added)}）" if added else "")
+    _send_line_msg(chat_id, TextMessage(text=msg), reply_token, [False])
 
 
 def _tag_event(ev: dict, text: str, chat_id: str, user_id: str) -> None:
@@ -2307,9 +2400,23 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 # 家人用習慣是直接回覆或直接說話，因此改為群組訊息一律處理；
                 # 若訊息剛好還是包含手打的標籤文字，先把它拿掉再往下走，
                 # 避免標籤文字干擾 AI 判斷或關鍵字比對。
+                # 公司版（GROUP_TRIGGER）：用 LINE 標註選到小幫手也算有叫它
+                mentioned = False
+                if _group_trigger():
+                    text, mentioned = _strip_self_mentions(msg.get("text", ""), msg)
                 if BOT_MENTION.lower() in text.lower():
+                    mentioned = True
                     text = re.sub(re.escape(BOT_MENTION), "", text, flags=re.IGNORECASE).strip()
                 if not text:
+                    if not (mentioned and _group_trigger()):
+                        continue
+                    text = "選單"
+            if _env_on("TAG_PROJECT_OWNER") and _members() and _looks_like_report(text):
+                background_tasks.add_task(process_report, text, chat_id, reply_token, source.get("userId", ""))
+                continue
+            if source_type in ("group", "room"):
+                text = _addressed_text(text, chat_id, mentioned)
+                if text is None:
                     continue
             if _feature_on("bible") and _is_bible_reading_cmd(text):
                 background_tasks.add_task(process_bible_reading, source.get("userId", ""), chat_id, reply_token)
