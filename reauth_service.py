@@ -9,6 +9,7 @@
 
 OAuth 用戶端是「電腦版應用程式」類型，Google 允許 http://localhost 任意連接埠當作回傳網址。
 """
+import os
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
@@ -19,6 +20,10 @@ REDIRECT_URI = "http://localhost:8765/"
 
 
 def _client() -> tuple[str, str]:
+    # 公司版：直接給 OAuth 用戶端，第一次授權就在 /reauth 網頁做（不用在電腦跑 auth_setup.py）
+    cid, secret = os.environ.get("GOOGLE_CLIENT_ID", "").strip(), os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+    if cid and secret:
+        return cid, secret
     data = load_token_data()
     return data["client_id"], data["client_secret"]
 

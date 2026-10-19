@@ -238,6 +238,7 @@ gcloud scheduler jobs create http doublea-check-reminders \
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE Channel access token |
 | `GEMINI_API_KEY` | Google Gemini API key |
 | `GOOGLE_TOKEN_JSON` | Google OAuth token（base64，由 auth_setup.py 產生） |
+| `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET` | （選用，取代 `GOOGLE_TOKEN_JSON`）OAuth 用戶端（「電腦版應用程式」類型）的 ID 與密鑰；部署後開 `/reauth?token=<SELFTEST_TOKEN>` 用要連的 Google 帳號登入，就完成第一次授權，不用在電腦跑 auth_setup.py |
 | `INVITE_EMAILS` | （選用）群組建立的行程要邀請誰，逗號分隔；`none`＝不邀請；沒設＝家用版預設 |
 | `BOT_NAME` | （選用）機器人自稱的名字，出現在「選單」和重新授權頁；沒設＝培正家AI小幫手 |
 | `FEATURES_OFF` | （選用）關掉的功能，逗號分隔：birthday、finance、restaurant、proverb、bible；沒設＝全開 |

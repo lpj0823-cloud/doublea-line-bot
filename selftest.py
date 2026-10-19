@@ -14,6 +14,13 @@ REQUIRED_ENV = ["LINE_CHANNEL_SECRET", "LINE_CHANNEL_ACCESS_TOKEN", "GOOGLE_TOKE
 OPTIONAL_ENV = ["ANTHROPIC_API_KEY", "PUSH_CHAT_ID", "ENABLE_PROVERB_PUSH", "GOOGLE_MAPS_API_KEY"]
 
 
+def _missing_env() -> list[str]:
+    missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+    if "GOOGLE_TOKEN_JSON" in missing and os.environ.get("GOOGLE_CLIENT_ID") and os.environ.get("GOOGLE_CLIENT_SECRET"):
+        missing.remove("GOOGLE_TOKEN_JSON")  # 公司版：OAuth 用戶端＋/reauth 網頁授權，不需要 GOOGLE_TOKEN_JSON
+    return missing
+
+
 def _check(name, fn):
     try:
         return {"item": name, "ok": True, "detail": str(fn())}
@@ -25,7 +32,7 @@ def run_selftest(scheduler=None) -> list[dict]:
     now = datetime.now(TAIPEI_TZ)
     results = []
 
-    missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+    missing = _missing_env()
     results.append({"item": "必要環境變數", "ok": not missing,
                     "detail": "齊全" if not missing else f"缺少：{', '.join(missing)}"})
     results.append({"item": "選用環境變數（已設定的）", "ok": True,
