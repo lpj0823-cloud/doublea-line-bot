@@ -1816,10 +1816,41 @@ def process_report(text: str, chat_id: str, reply_token: str | None = None, user
     _send_line_msg(chat_id, TextMessage(text=msg), reply_token, [False])
 
 
+# 公司日曆的顏色習慣（10/19 淨雯在群組說明，也對照過公司日曆的舊行程）：紅＝會議、藍＝員工出席、綠＝出差
+_COLOR_MEETING, _COLOR_STAFF, _COLOR_TRIP = "11", "7", "2"  # Google 日曆的番茄紅、孔雀藍、鼠尾草綠
+_STAFF_WORDS = ("休假", "請假", "特休", "病假", "事假", "補休", "公假", "喪假", "婚假", "產假", "陪產",
+                "育嬰", "健檢", "體檢", "放假", "颱風假", "停班", "聚餐", "尾牙", "春酒", "員工旅遊")
+
+
+def _event_colors_on() -> bool:
+    """EVENT_COLORS=on／off；沒設時公司版開、家用版關。"""
+    v = os.environ.get("EVENT_COLORS", "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return BOT_NAME != "培正家AI小幫手"
+
+
+def _event_color(title: str) -> str | None:
+    """照標題上色：出差→綠，請假／休假／健檢／聚餐這類員工出席→藍，其他（會議、案場行程）→紅。"""
+    if not _event_colors_on():
+        return None
+    if "出差" in title:
+        return _COLOR_TRIP
+    if any(w in title for w in _STAFF_WORDS):
+        return _COLOR_STAFF
+    return _COLOR_MEETING
+
+
 def _tag_event(ev: dict, text: str, chat_id: str, user_id: str) -> None:
     """公司版（TAG_PROJECT_OWNER=true）：行程標題前加【專案｜負責人】。
-    專案：訊息裡有負責人清單上的專案就用它，否則用 AI 抓的 project；負責人：清單上的人，沒有就寫發問的人。"""
+    專案：訊息裡有負責人清單上的專案就用它，否則用 AI 抓的 project；負責人：清單上的人，沒有就寫發問的人。
+    公司版也照同事的顏色習慣上色（_event_color）。"""
     ai_project = (ev.pop("project", None) or "").strip()
+    color = _event_color(ev.get("title", ""))
+    if color:
+        ev["color"] = color
     if not _env_on("TAG_PROJECT_OWNER"):
         return
     owners = load_project_owners()
