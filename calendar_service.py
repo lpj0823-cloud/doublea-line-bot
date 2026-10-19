@@ -399,6 +399,9 @@ def create_calendar_event(event_data: dict, invite_wife: bool = True) -> dict:
     if event_data.get("description"):
         body["description"] = event_data["description"]
 
+    if event_data.get("color"):
+        body["colorId"] = event_data["color"]
+
     result = (
         service.events()
         .insert(calendarId=CALENDAR_ID, body=body, sendUpdates="all")
