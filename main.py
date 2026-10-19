@@ -98,7 +98,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"].strip()
 
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
 REMINDER_MINUTES = 120
-BOT_NAME = "培正家AI小幫手"
+BOT_NAME = os.environ.get("BOT_NAME", "").strip() or "培正家AI小幫手"  # 公司版設 BOT_NAME=力口小幫手
 BOT_MENTION = f"@{BOT_NAME}"
 
 # 圖片＋文字說明才觸發行事曆：
@@ -903,7 +903,7 @@ def send_event_reminder(chat_id: str, title: str, start_str: str) -> None:
 
 def _menu_text() -> str:
     return (
-        "🙏 平安！我是培正家AI小幫手。\n"
+        f"🙏 平安！我是{BOT_NAME}。\n"
         "以下功能隨時傳訊息給我就能用：\n\n"
         "📅 行事曆\n"
         "・「明天下午3點開會」→ 自動加入\n"
@@ -2278,7 +2278,7 @@ def _reauth_page(token: str, notice: str = "") -> str:
     tok = urllib.parse.quote(token)
     return f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>重新授權 Google｜培正家AI小幫手</title>
+<title>重新授權 Google｜{BOT_NAME}</title>
 <style>body{{font-family:sans-serif;max-width:640px;margin:32px auto;padding:0 16px;line-height:1.7}}
 .btn{{display:inline-block;background:#0f6b5c;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none}}
 textarea{{width:100%;min-height:90px;font-size:14px}} button{{font-size:16px;padding:8px 18px}}
