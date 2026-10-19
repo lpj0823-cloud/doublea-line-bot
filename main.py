@@ -1183,7 +1183,7 @@ def _canonicalize(text: str) -> tuple[str, bool]:
     if t.startswith("+"):
         return t, False
 
-    clean = _FILLER_RE.sub("", _PUNCT_RE.sub("", t)).lower()
+    clean = _FILLER_RE.sub("", _PUNCT_RE.sub("", t)).lower().replace("周", "週")  # 「周」「週」常混用，指令都認得
     if clean in _ALIAS_LOOKUP and len(t) <= 14:
         return _ALIAS_LOOKUP[clean], False
 
