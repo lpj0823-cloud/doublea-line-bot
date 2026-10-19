@@ -69,7 +69,7 @@ from shopping_service import (
     mark_done_by_keyword,
 )
 from notes_service import add_note, delete_note_by_index, get_notes
-from owners_service import load_project_owners, remove_project_owner, set_project_owner
+from owners_service import load_project_owners, projects_by_owner, remove_project_owner, set_project_owner
 from proverbs_service import get_todays_proverbs, get_proverbs_header, get_daily_verses
 from bible_plan_service import get_daily_reading, allowed_user_ids
 from rate_limiter import check_rate_limit
@@ -650,7 +650,9 @@ def weekly_push_job() -> None:
         print("[DoubleA] 每週推播：找不到 chat_id，略過")
         return
     try:
-        _push_bundle(chat_id, [os.environ.get("WEEKLY_PUSH_TEXT", "").strip().replace("\\n", "\n")])
+        msg = os.environ.get("WEEKLY_PUSH_TEXT", "").strip().replace("\\n", "\n")
+        owners = _owners_text() if _env_on("TAG_PROJECT_OWNER") else ""
+        _push_bundle(chat_id, [msg + ("\n\n" + owners if owners else "")])
         print("[DoubleA] 每週推播已發送")
     except Exception as e:
         print(f"[DoubleA] 每週推播失敗：{e}")
@@ -1101,10 +1103,8 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
             else:
                 _respond("❓ 格式：+負責 專案名稱 負責人\n例：+負責 淡水林宅 淨雯")
             return True
-        if text.strip() in ("負責清單", "負責人清單", "專案負責人"):
-            owners = load_project_owners()
-            _respond("👥 專案負責人\n" + "\n".join(f"・{p}：{o}" for p, o in owners.items()) if owners
-                     else "👥 還沒有專案負責人清單\n用「+負責 淡水林宅 淨雯」新增")
+        if text.strip() in ("負責清單", "負責人清單", "專案負責人", "手上的專案", "誰負責什麼"):
+            _respond(_owners_text() or "👥 還沒有專案負責人清單\n用「+負責 淡水林宅 淨雯」新增")
             return True
         if text.startswith("刪負責"):
             name = text[len("刪負責"):].strip()
@@ -1660,6 +1660,14 @@ def _display_name(chat_id: str, user_id: str) -> str:
             print(f"[DoubleA] 取 LINE 名稱失敗：{e}")
             return ""
     return _NAME_CACHE[user_id]
+
+
+def _owners_text() -> str:
+    """「👥 目前手上的專案」：一人一行；清單是空的就回空字串。"""
+    grouped = projects_by_owner()
+    if not grouped:
+        return ""
+    return "👥 目前手上的專案\n" + "\n".join(f"・{owner}：{'、'.join(projects)}" for owner, projects in grouped.items())
 
 
 def _tag_event(ev: dict, text: str, chat_id: str, user_id: str) -> None:

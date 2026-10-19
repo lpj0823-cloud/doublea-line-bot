@@ -33,3 +33,11 @@ def remove_project_owner(project: str) -> bool:
     del owners[project]
     _save(owners)
     return True
+
+
+def projects_by_owner() -> dict[str, list[str]]:
+    """每個人手上的專案（照加入順序）：{負責人: [專案, ...]}。"""
+    grouped: dict[str, list[str]] = {}
+    for project, owner in load_project_owners().items():
+        grouped.setdefault(owner, []).append(project)
+    return grouped
