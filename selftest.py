@@ -16,11 +16,11 @@ OPTIONAL_ENV = ["PUSH_CHAT_ID", "ENABLE_PROVERB_PUSH", "GOOGLE_MAPS_API_KEY"]
 
 # 金鑰格式：名稱 →（檢查、正確的樣子）；只看開頭與長度，不輸出內容
 _KEY_RULES = {
-    "LINE_CHANNEL_SECRET": (lambda v: re.fullmatch(r"[0-9a-f]{32}", v), "32 個英文數字"),
+    "LINE_CHANNEL_SECRET": (lambda v: re.fullmatch(r"[0-9a-f]{32}", v.lower()), "32 個英文數字"),  # 驗章時會轉小寫
     "LINE_CHANNEL_ACCESS_TOKEN": (lambda v: len(v) >= 100 and " " not in v, "很長的一串（100 字以上）"),
     "ANTHROPIC_API_KEY": (lambda v: v.startswith("sk-ant-"), "sk-ant- 開頭"),
-    "GEMINI_API_KEY": (lambda v: v.startswith("AIza"), "AIza 開頭"),
-    "WEATHER_API_KEY": (lambda v: re.fullmatch(r"[0-9a-f]{32}", v), "32 個英文數字"),
+    "GEMINI_API_KEY": (lambda v: _looks_like(v) in ("", "Gemini／Google 金鑰"), "Gemini 金鑰"),  # 能不能用由「Gemini API」實測
+    "WEATHER_API_KEY": (lambda v: re.fullmatch(r"[0-9a-f]{32}", v.lower()), "32 個英文數字"),
     "GOOGLE_CLIENT_ID": (lambda v: v.endswith(".apps.googleusercontent.com"), "結尾是 .apps.googleusercontent.com"),
     "GOOGLE_CLIENT_SECRET": (lambda v: v.startswith("GOCSPX-"), "GOCSPX- 開頭"),
 }
@@ -58,6 +58,21 @@ def _key_problems() -> dict[str, str]:
             problems[name] = f"和 {seen[v]} 一模一樣，可能貼錯格"
         seen.setdefault(v, name)
     return problems
+
+
+def _claude_ok() -> str:
+    """實際問 Claude：金鑰能用、模型存在（不產生文字，不花錢）。"""
+    import anthropic
+    from event_parser import ANTHROPIC_MODEL
+    anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=15).models.retrieve(ANTHROPIC_MODEL)
+    return f"金鑰可以用（模型 {ANTHROPIC_MODEL}）"
+
+
+def _gemini_ok() -> str:
+    """實際問 Gemini：金鑰能用（只查模型資料，不花錢）。"""
+    from google import genai
+    genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={"timeout": 15000}).models.get(model="gemini-2.5-flash")
+    return "金鑰可以用（gemini-2.5-flash）"
 
 
 def _off(feature: str) -> bool:
@@ -108,6 +123,8 @@ def run_selftest(scheduler=None) -> list[dict]:
         from todo_service import get_pending_tasks
         return f"待辦 {len(get_pending_tasks())} 筆"
     results.append(_check("Google Tasks 待辦", tasks))
+    results.append(_check("Claude API（看懂文字）", _claude_ok))
+    results.append(_check("Gemini API（看照片）", _gemini_ok))
 
     def proverbs():
         from proverbs_service import get_todays_proverbs
