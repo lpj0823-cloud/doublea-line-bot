@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -2363,6 +2364,51 @@ def process_location(title: str, address: str, lat: float, lon: float,
         _respond("⚠️ 位置記錄失敗，請稍後再試。")
 
 
+# ── 誰能用（公司版）─────────────────────────────────────────────────────────────
+
+def _allowed_groups() -> set[str]:
+    """ALLOWED_GROUP_ID：只讓這些群組、和群組裡的人私訊使用（公司版，逗號分隔）；沒設＝誰都能用（家用版）。"""
+    return {g.strip() for g in os.environ.get("ALLOWED_GROUP_ID", "").split(",") if g.strip()}
+
+
+_MEMBER_CACHE: dict[str, tuple[bool, float]] = {}
+_MEMBER_TTL = 600  # 秒：退出群組的人，最晚 10 分鐘後私訊就不能用
+
+
+def _is_member(user_id: str) -> bool | None:
+    """私訊的人在不在允許的群組裡：在 True、不在 False、LINE 暫時查不到 None（這次先擋，不記住）。"""
+    if not user_id:
+        return False
+    hit = _MEMBER_CACHE.get(user_id)
+    if hit and time.time() - hit[1] < _MEMBER_TTL:
+        return hit[0]
+    unknown = False
+    for gid in sorted(_allowed_groups()):
+        try:
+            with ApiClient(line_config) as api_client:
+                api = MessagingApi(api_client)
+                if gid.startswith("R"):
+                    api.get_room_member_profile(gid, user_id)
+                else:
+                    api.get_group_member_profile(gid, user_id)
+            _MEMBER_CACHE[user_id] = (True, time.time())
+            return True
+        except Exception as e:
+            if getattr(e, "status", None) != 404:  # 404＝不在這個群組
+                print(f"[DoubleA] 查群組成員失敗：{e}")
+                unknown = True
+    if unknown:
+        return None
+    _MEMBER_CACHE[user_id] = (False, time.time())
+    return False
+
+
+def _outsider_text(member: bool | None) -> str:
+    if member is None:
+        return "⚠️ 暫時確認不到你在不在公司群組，請稍後再試，或直接在群組裡叫我。"
+    return f"🔒 這是{BOT_NAME}，只給公司群組裡的同事使用。"
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.post("/webhook")
@@ -2388,6 +2434,18 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         source_type = source.get("type", "user")
         chat_id = source.get("groupId") or source.get("roomId") or source.get("userId", "")
         reply_token = event.get("replyToken")
+
+        if _allowed_groups():  # 公司版：其他群組不回應；私訊要是公司群組的成員
+            if source_type in ("group", "room"):
+                if chat_id not in _allowed_groups():
+                    continue
+            else:
+                member = await asyncio.to_thread(_is_member, source.get("userId", ""))
+                if not member:
+                    print("[DoubleA] 擋下非成員私訊")
+                    if reply_token:
+                        background_tasks.add_task(_reply_line, reply_token, _outsider_text(member))
+                    continue
 
         if msg.get("type") == "text":
             text = msg.get("text", "").strip()
