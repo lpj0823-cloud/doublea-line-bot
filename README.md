@@ -244,6 +244,7 @@ gcloud scheduler jobs create http doublea-check-reminders \
 | `FEATURES_OFF` | （選用）關掉的功能，逗號分隔：birthday、finance、restaurant、proverb、bible、share（行程確認附的分享連結）；沒設＝全開 |
 | `ENABLE_MORNING_PUSH` | （選用）每天 07:00 早安摘要，預設開；設 `false` 關掉 |
 | `WEEKLY_PUSH_AT`、`WEEKLY_PUSH_TEXT` | （選用）每週固定推播一則，例如 `mon 08:30`＋提醒文字（`\n` 換行）；兩個都設才會推 |
+| `WEEKLY_PUSH_MENTION_ALL` | （選用）每週推播到群組時，第一則前面 @所有人；沒設＝開，`false`＝關。私訊小幫手「測試週一推播」可先看內容並請 LINE 驗證格式，不會發到群組 |
 | `EVENT_COLORS` | （選用）行程照公司日曆的顏色習慣上色：出差＝綠、請假／休假／健檢／聚餐＝藍、其他（會議、案場行程）＝紅。沒設＝公司版開、家用版關；`on`／`off` 可強制開關 |
 | `TAG_PROJECT_OWNER` | （選用）`true`＝行程標題加【專案｜負責人】：負責人清單用「+負責 專案 負責人」管理，清單沒有就寫發問的人；每週推播會附上「每個人手上的專案」。請假、出差照同事習慣：標題寫「淨雯請假」不加【】，沒說幾點就建成整天 |
 | `GROUP_TRIGGER` | （選用）群組裡句子開頭要打這個詞才處理（例 `小幫手`），或用 LINE 標註小幫手；+記、+買、待辦這類指令不用叫；沒設＝每句都讀 |
