@@ -161,6 +161,11 @@ def _feature_off_command(text: str) -> bool:
     return any(t.startswith(p) for f, ps in _FEATURE_PREFIXES.items() if not _feature_on(f) for p in ps)
 
 
+def _admin_ids() -> set[str]:
+    """ADMIN_USER_IDS：能用「重新授權」的人（LINE 使用者 ID，逗號分隔，私訊傳「群組ID」可查自己的）；沒設＝不限（家用版）。"""
+    return {u.strip() for u in os.environ.get("ADMIN_USER_IDS", "").split(",") if u.strip()}
+
+
 def _group_trigger() -> str:
     """GROUP_TRIGGER：群組裡句子開頭要先叫它（例如「小幫手」）才處理；沒設＝每句都讀（家用版）。"""
     return os.environ.get("GROUP_TRIGGER", "").strip()
@@ -912,6 +917,12 @@ def _format_multi_calendar_confirmation(results: list[dict], invited: bool = Tru
     return "\n".join(lines)
 
 
+def _todo_title(title: str) -> str:
+    """待辦標題去掉開頭的「記得／要記得／提醒我」：記得寄報價單 → 寄報價單。"""
+    t = (title or "").strip()
+    return re.sub(r"^(?:要記得|記得要|記得|提醒我要|提醒我)\s*", "", t) or t
+
+
 def _format_todo_list(tasks: list) -> str:
     if not tasks:
         return "✅ 目前沒有待辦事項！"
@@ -1013,7 +1024,8 @@ def send_event_reminder(chat_id: str, title: str, start_str: str) -> None:
 def _menu_text() -> str:
     lines = [  # (功能開關, 說明)；空字串＝一定開
         ("", "📋 待辦：「記得買菜」新增；「待辦」查看；「完成 買菜」或「del 1」完成"),
-        ("", "🛒 購物：「+買 牛奶」；「購物清單」；「買到 1」"),
+        ("", "🛒 採購：「+買 矽利康」；「採購清單」；「買到 1」" if _group_trigger()
+         else "🛒 購物：「+買 牛奶」；「購物清單」；「買到 1」"),
         ("", "📓 筆記：「+記 內容」；「筆記」；「刪筆記 1」"),
         ("birthday", "🎂 生日：「+生日 媽媽 3/15」；「生日清單」；「刪生日 1」"),
         ("finance", "💰 記帳：「+專案 日本旅行」；「+花費 日本旅行 午餐 850」；「專案清單」"),
@@ -1070,7 +1082,7 @@ _PUNCT_RE = re.compile(r"[\s「」『』\"'“”!！?？。,，、~～:：]")
 # 純「查詢／動作」類指令的各種說法 → 標準指令
 _EXACT_ALIASES: dict[str, tuple[str, ...]] = {
     "待辦": ("待辦", "待辦清單", "待辦事項", "待办", "代辦", "代辦清單", "代辦事項", "todo", "todolist", "任務", "任務清單"),
-    "購物清單": ("購物清單", "購物", "購物單", "購物列表", "採買清單", "要買的"),
+    "購物清單": ("購物清單", "購物", "購物單", "購物列表", "採買清單", "要買的", "採購", "採購清單", "採購單", "採購列表"),
     "筆記": ("筆記", "筆記清單", "筆記列表", "記事本", "所有筆記"),
     "生日清單": ("生日清單", "生日", "生日表", "生日列表", "生日提醒"),
     "專案清單": ("專案清單", "專案", "專案列表", "記帳", "記帳清單", "花費清單"),
@@ -1093,6 +1105,7 @@ _ALIAS_LOOKUP.update({
 # 「指令 + 內容」類的各種說法 → 標準格式（(pattern, replacement, 是否為寬鬆比對)）
 _PREFIX_RULES: list[tuple[re.Pattern, str, bool]] = [
     (re.compile(r"^(?:新增購物|加購物|加買|加入購物清單|購物)\s*[:：]?\s*(.+)$"), r"+買 \1", False),
+    (re.compile(r"^(?:採購|加採購|新增採購)(?:\s+|\s*[:：]\s*)(.+)$"), r"+買 \1", False),  # 要有空白或冒號，「採購會議」不算
     (re.compile(r"^(?:記筆記|新增筆記|加筆記|筆記)\s*[:：]?\s*(.+)$"), r"+記 \1", False),
     (re.compile(r"^(?:新增生日|加生日|記生日)\s*[:：]?\s*(.+)$"), r"+生日 \1", False),
     (re.compile(r"^(?:新增專案|建立專案|加專案|開專案)\s*[:：]?\s*(.+)$"), r"+專案 \1", False),
@@ -1115,6 +1128,7 @@ def _canonicalize(text: str) -> tuple[str, bool]:
     if not t:
         return text, False
     # 「+ 買 牛奶」→「+買 牛奶」
+    t = re.sub(r"^\+\s*採購", "+買", t)  # 「+採購 矽利康」＝「+買 矽利康」
     t = re.sub(r"^\+\s*(買|記|生日|專案|花費)", r"+\1", t)
     if t.startswith("+"):
         return t, False
@@ -1143,7 +1157,7 @@ def _loose_match(text: str, keyword: str, max_len: int = 8) -> bool:
     return keyword in t and len(t) <= max_len
 
 
-def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> bool:
+def handle_command(text: str, chat_id: str, reply_token: str | None = None, user_id: str = "") -> bool:
     _used: list[bool] = [False]
     text, _loose = _canonicalize(text)  # 放寬文字解讀：各種說法先轉成標準指令
     if _feature_off_command(text):
@@ -1214,6 +1228,12 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None) -> b
 
     # 「重新授權」= 產生 15 分鐘有效的 Google 重新授權連結（只有群組裡的家人拿得到）
     if text.strip() == "重新授權":
+        if chat_id[:1] in ("C", "R") and (_group_trigger() or _allowed_groups()):
+            _respond("🔒 重新授權請私訊我，連結不能貼在群組裡。")  # 公司版：群組裡誰都看得到連結
+            return True
+        if _admin_ids() and user_id not in _admin_ids():
+            _respond("🔒 只有管理員可以重新授權 Google。")
+            return True
         import secrets
         nonce = secrets.token_urlsafe(18)
         save_state({"reauth_nonce": nonce, "reauth_exp": time.time() + 900})
@@ -1895,7 +1915,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None, use
         process_image_as_calendar(chat_id, reply_token, text, user_id)
         return
 
-    if handle_command(text, chat_id, reply_token):
+    if handle_command(text, chat_id, reply_token, user_id):
         return
 
     pending = load_pending_edit(chat_id)
@@ -2090,7 +2110,7 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None, use
 
     elif msg_type == "todo":
         try:
-            task = add_task(result["title"], result.get("description"))
+            task = add_task(_todo_title(result["title"]), result.get("description"))
             reply = (
                 f"📌 已記錄到 Google Tasks！\n\n"
                 f"{_t(task['title'])}\n\n"
@@ -2683,6 +2703,8 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 def home():
+    if BOT_NAME != "培正家AI小幫手":
+        return _team_page(f"<h1>{BOT_NAME}</h1>\n<p>這是內部使用的 LINE 行事曆小幫手，僅供團隊成員使用，協助管理行事曆、待辦事項、筆記與採購清單。</p>\n<p>本服務不對外公開招募使用者。</p>\n<p><a href=\"/privacy\">隱私權政策</a></p>", BOT_NAME)
     return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <title>培正家AI小幫手</title></head><body style="font-family:sans-serif;max-width:600px;margin:40px auto;line-height:1.7">
 <h1>培正家AI小幫手</h1>
@@ -2694,6 +2716,12 @@ def home():
 
 @app.get("/privacy", response_class=HTMLResponse)
 def privacy():
+    if BOT_NAME != "培正家AI小幫手":
+        return _team_page(
+            f"<h1>隱私權政策</h1>\n<p>{BOT_NAME}（下稱「本服務」）是僅供團隊成員使用的內部 LINE 機器人，不對外公開招募使用者，也不會將任何資料提供、販售或分享給無關第三方。</p>\n"
+            "<h2>蒐集的資料</h2>\n<p>本服務會處理成員在 LINE 對話中主動提供的文字與照片，用於建立行事曆事件、待辦事項、筆記與採購清單，並經授權存取團隊的 Google 日曆與 Google Tasks 以完成上述功能。</p>\n"
+            "<h2>資料儲存與使用</h2>\n<p>相關資料僅儲存於本服務的雲端磁碟與團隊授權的 Google 帳號（日曆／Tasks）中，僅用於提供上述功能，不做其他用途。</p>\n"
+            "<h2>聯絡方式</h2>\n<p>如有任何問題，請透過 LINE 直接聯繫本服務管理者。</p>", f"隱私權政策 － {BOT_NAME}")
     return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <title>隱私權政策 － 培正家AI小幫手</title></head><body style="font-family:sans-serif;max-width:600px;margin:40px auto;line-height:1.7">
 <h1>隱私權政策</h1>
@@ -2705,6 +2733,12 @@ def privacy():
 <h2>聯絡方式</h2>
 <p>如有任何問題，請透過 LINE 直接聯繫本服務管理者。</p>
 </body></html>"""
+
+
+def _team_page(body: str, title: str) -> str:
+    """公司版網站頁面（家用版維持原本的培正家文字）。"""
+    return (f"<!doctype html><html lang=\"zh-Hant\"><head><meta charset=\"utf-8\">\n<title>{title}</title></head>"
+            f"<body style=\"font-family:sans-serif;max-width:600px;margin:40px auto;line-height:1.7\">\n{body}\n</body></html>")
 
 
 if __name__ == "__main__":
