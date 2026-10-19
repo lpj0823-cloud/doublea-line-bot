@@ -15,6 +15,11 @@ def add_task(title: str, notes: str | None = None) -> dict:
     return service.tasks().insert(tasklist=TASKLIST_ID, body=body).execute()
 
 
+def _named(tasks: list) -> list:
+    """跳過沒有標題的空白待辦（清單上不會出現空白的「4.」）。"""
+    return [t for t in tasks if (t.get("title") or "").strip()]
+
+
 def get_pending_tasks() -> list:
     """Return list of incomplete tasks from Google Tasks."""
     service = build("tasks", "v1", credentials=get_credentials())
@@ -23,7 +28,7 @@ def get_pending_tasks() -> list:
         showCompleted=False,
         showHidden=False,
     ).execute()
-    return result.get("items", [])
+    return _named(result.get("items", []))
 
 
 def complete_task_by_keyword(keyword: str) -> str | None:
@@ -52,7 +57,7 @@ def complete_task_by_index(index: int) -> str | None:
         showCompleted=False,
         showHidden=False,
     ).execute()
-    tasks = result.get("items", [])
+    tasks = _named(result.get("items", []))  # 和清單一樣跳過沒有標題的，編號才對得上
     if index < 1 or index > len(tasks):
         return None
     task = tasks[index - 1]
