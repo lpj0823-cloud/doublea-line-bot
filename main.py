@@ -2435,12 +2435,16 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None, use
             ev["description"] = text
             _fix_event_times(ev)
             _tag_event(ev, text, chat_id, user_id)
+        single = len(events) == 1  # 送法照舊：一筆走 _respond，多筆走 _send_texts
         events, notes = _dedup(events, chat_id)
         reply = _create_and_confirm(events, chat_id, notes, f"\n\n{_cheer_calendar()}", _write_fail_text, "以下事件建立失敗：")
-        try:
-            _send_texts(chat_id, [reply], reply_token, _used_reply)
-        except Exception as _e:
-            print(f"[DoubleA] 行程確認訊息送出失敗：{_e}")
+        if single:
+            _respond(reply)
+        else:
+            try:
+                _send_texts(chat_id, [reply], reply_token, _used_reply)
+            except Exception as _e:
+                print(f"[DoubleA] 多筆行程確認訊息送出失敗：{_e}")
 
     elif msg_type == "todo":
         try:
