@@ -36,7 +36,7 @@ from linebot.v3.messaging import (
 )
 
 from calendar_service import (
-    create_calendar_event, delete_event_by_id, find_and_delete_event, find_and_update_event,
+    create_calendar_event, delete_event_by_id, events_between, find_and_delete_event, find_and_update_event,
     invite_label, invitees, list_events_for_date, list_events_for_range, list_upcoming_events,
     update_calendar_event, update_event_field_by_id,
 )
@@ -46,6 +46,7 @@ from event_parser import (
 )
 from state_service import (
     add_reminder,
+    clear_pending_create,
     clear_pending_edit,
     clear_pending_image,
     get_due_reminders,
@@ -53,11 +54,13 @@ from state_service import (
     load_last_event,
     load_state,
     save_state,
+    load_pending_create,
     load_pending_edit,
     load_pending_image,
     mark_reminder_sent,
     save_chat_id,
     save_last_event,
+    save_pending_create,
     save_pending_edit,
     save_pending_image,
 )
@@ -138,8 +141,8 @@ def _gerr(e: Exception, default: str) -> str:
 
 def _push_target() -> str | None:
     """排程推播的目的地：優先用環境變數 PUSH_CHAT_ID（建議設成「培正家」群組 ID），
-    否則用最近一次記住的群組。"""
-    return os.environ.get("PUSH_CHAT_ID") or load_chat_id()
+    再來是行事曆群組（_calendar_groups），最後才用最近一次記住的群組。"""
+    return os.environ.get("PUSH_CHAT_ID") or next(iter(sorted(_calendar_groups())), None) or load_chat_id()
 
 
 def _env_on(name: str, default: str = "false") -> bool:
@@ -192,8 +195,10 @@ def _addressed_text(text: str, chat_id: str, mentioned: bool) -> str | None:
     canon, _ = _canonicalize(text)
     if canon in _NO_TRIGGER_COMMANDS or _NO_TRIGGER_PREFIX.match(canon):
         return text
-    if load_pending_edit(chat_id) or (load_pending_image(chat_id) and _is_calendar_trigger(text)):
-        return text  # 正在選單操作、或傳完照片要加行事曆：下一句不用再叫
+    if load_pending_edit(chat_id):
+        return text  # 正在選單操作：下一句不用再叫（傳完照片要加行事曆還是要叫小幫手）
+    if canon == "照樣建立" and load_pending_create(chat_id):
+        return text  # 回答「時段重疊，要不要照樣建立」：不用再叫
     return None
 
 
@@ -905,11 +910,15 @@ def _generate_share_link(ev: dict) -> str:
 # ── Formatters ────────────────────────────────────────────────────────────────
 
 def _invite_line(invited: bool) -> str:
-    """行程確認訊息的邀請狀態：家用版文字不變；公司版依 INVITE_EMAILS。"""
+    """行程確認訊息的邀請狀態：家用版文字不變；公司版依 INVITE_EMAILS。
+    不寄邀請、靠共用行事曆同步的（公司版 INVITE_EMAILS=none）告知已登記，寫 CALENDAR_SYNC_NOTE 說同步到哪。"""
     who = invite_label()
     if invited:
         return f"✅ {who} 已收到邀請"
-    return f"👤 僅記錄在你的行事曆（未邀請 {who}）" if who else "👤 僅記錄在行事曆"
+    if who:
+        return f"👤 僅記錄在你的行事曆（未邀請 {who}）"
+    note = os.environ.get("CALENDAR_SYNC_NOTE", "").strip() or ("共用這本行事曆的同事都看得到" if _allowed_groups() else "")
+    return f"✅ 已登記，{note}" if note else "👤 僅記錄在行事曆"
 
 
 def _reminder_line(multi: bool = False) -> str:
@@ -1138,6 +1147,7 @@ _EXACT_ALIASES: dict[str, tuple[str, ...]] = {
     "清除已買": ("清除已買", "清除買完", "清掉已買", "清空已買", "清除已買的"),
     "刪除行程": ("刪除行程", "刪行程", "取消行程", "移除行程"),
     "修改行程": ("修改行程", "改行程", "編輯行程", "更改行程"),
+    "照樣建立": ("照樣建立", "照樣建", "照建", "還是建立", "還是要建", "一樣建立"),
     "選單": ("選單", "功能", "功能表", "功能選單", "說明", "幫助", "help", "menu", "指令", "怎麼用", "?", "？"),
     "群組ID": ("群組id", "chatid", "群組編號", "聊天室id", "群組代號"),
     "重新授權": ("重新授權", "授權", "google授權", "重新登入", "reauth"),
@@ -1243,8 +1253,9 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
         _now = datetime.now(TAIPEI_TZ)
         head = f"🙏 平安！今天是 {_now.strftime('%-m月%-d日')}"
         try:
-            evs = list_events_for_date(_now)
-            head += "\n\n" + ("📅 今日行程\n" + _format_day_events(evs) if evs else "📅 今天沒有行程")
+            if _calendar_block(chat_id, write=False) is None:  # 別的群組不碰行事曆：平安只給待辦和箴言
+                evs = list_events_for_date(_now)
+                head += "\n\n" + ("📅 今日行程\n" + _format_day_events(evs) if evs else "📅 今天沒有行程")
         except Exception as e:
             print(f"[DoubleA] 平安：行事曆取得失敗 {e}")
             head += "\n\n" + _gerr(e, "📅 行事曆暫時無法取得")
@@ -1307,6 +1318,7 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
             ok = all(r["ok"] for r in rs)
             lines = [f"🩺 自我檢查：{'全部正常 ✅' if ok else '有項目異常 ❌'}\n"]
             lines += [f"{'✅' if r['ok'] else '❌'} {r['item']}：{r['detail'][:80]}" for r in rs]
+            lines.append(f"ℹ️ 行事曆：{_calendar_summary()}")
             _respond("\n".join(lines))
         except Exception as e:
             _respond(f"⚠️ 自我檢查執行失敗：{type(e).__name__}")
@@ -1369,6 +1381,24 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
             _respond(msg)
         except Exception as e:
             _respond(f"⚠️ 標記失敗：{e}")
+        return True
+
+    # 行事曆指令（刪除／修改選單、照樣建立）：別的群組不做也不回話；公司版私訊只能查
+    if text.strip() in ("刪除行程", "修改行程", "照樣建立") or text.startswith(("確認刪除 ", "選擇修改 ", "修改欄位 ")):
+        blocked = _calendar_block(chat_id, write=True)
+        if blocked is not None:
+            if blocked:
+                _respond(blocked)
+            return True
+
+    if text.strip() == "照樣建立":
+        waiting = load_pending_create(chat_id)
+        clear_pending_create(chat_id)
+        if not waiting:
+            _respond("目前沒有等待建立的行程（超過 10 分鐘要重新傳一次）。")
+        else:
+            reply = _create_and_confirm(waiting, chat_id, [], f"\n\n{_cheer_calendar()}", _write_fail_text, "以下事件建立失敗：")
+            _send_texts(chat_id, [reply], reply_token, _used)
         return True
 
     if text.strip() == "刪除行程":
@@ -1692,6 +1722,11 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
         # 只接手「像查詢」的句子：很短（例如「明天行程」）或有查詢語氣；長句交給 AI
         and (len(_plain) <= 8 or any(h in text for h in _CALENDAR_QUERY_HINTS))
     ):
+        blocked = _calendar_block(chat_id, write=False)
+        if blocked is not None:
+            if blocked:
+                _respond(blocked)
+            return True
         now = datetime.now(TAIPEI_TZ)
         today = now.date()
         start_d = end_d = label = None
@@ -1963,9 +1998,195 @@ def _tag_event(ev: dict, text: str, chat_id: str, user_id: str) -> None:
                          f"\n\n專案：{project or '未標'}｜負責人：{owner or '未標'}｜發問：{asker or display or '未知'}").strip()
 
 
+def _calendar_groups() -> set[str]:
+    """能用行事曆的群組：CALENDAR_GROUP_ID（逗號分隔）＞ALLOWED_GROUP_ID（公司版）＞PUSH_CHAT_ID（家用版＝培正家）。
+    只認群組／聊天室（C、R 開頭）；都沒有＝舊做法，每個群組都能用。"""
+    for name in ("CALENDAR_GROUP_ID", "ALLOWED_GROUP_ID", "PUSH_CHAT_ID"):
+        ids = {g.strip() for g in os.environ.get(name, "").split(",") if g.strip()[:1] in ("C", "R")}
+        if ids:
+            return ids
+    return set()
+
+
+def _calendar_mode(chat_id: str) -> str:
+    """這裡能做多少行事曆的事：full 新增修改刪除查詢都行／read 只能查／off 完全不碰、不回話。
+    群組：行事曆群組 full、其他 off（沒有行事曆群組＝每個群組 full）。
+    私訊：CALENDAR_DM（full／read／off）；沒設時公司版（有 ALLOWED_GROUP_ID）read、家用版 full。"""
+    if chat_id[:1] in ("C", "R"):
+        groups = _calendar_groups()
+        return "full" if not groups or chat_id in groups else "off"
+    mode = os.environ.get("CALENDAR_DM", "").strip().lower()
+    if mode in ("full", "read", "off"):
+        return mode
+    return "read" if _allowed_groups() else "full"
+
+
+def _calendar_block(chat_id: str, write: bool) -> str | None:
+    """這件行事曆的事能不能在這裡做：可以回 None；不行回要說的話（空字串＝不回話，用在別的群組）。"""
+    mode = _calendar_mode(chat_id)
+    if mode == "full" or (mode == "read" and not write):
+        return None
+    print(f"[DoubleA] 這裡不處理行事曆（{chat_id[:1]}，{mode}）")
+    if mode == "off":
+        return ""
+    trig = _group_trigger()
+    how = f"先打「{trig}」或 @{BOT_NAME} 再打行程" if trig else "直接打行程"
+    where = "公司群組" if _allowed_groups() else "家裡的群組"
+    return f"📅 新增、修改、刪除行程請到{where}：{how}。\n私訊可以查行程，例如「明天行程」。"
+
+
 def _invites_wife(chat_id: str) -> bool:
-    """群組／聊天室（C、R 開頭）建立的行程才邀請（對象見 invitees()，預設 Ginny）；私訊（U 開頭）只寫自己的行事曆。"""
-    return chat_id.startswith(("C", "R")) and bool(invitees())
+    """行事曆群組（家用版＝培正家，見 _calendar_groups）建立的行程才邀請（對象見 invitees()，預設 Ginny）；
+    私訊（U 開頭）只寫自己的行事曆。"""
+    return chat_id.startswith(("C", "R")) and _calendar_mode(chat_id) == "full" and bool(invitees())
+
+
+def _dedup_on() -> bool:
+    """CALENDAR_DEDUP=on／off；沒設時公司版（有 ALLOWED_GROUP_ID）開、家用版關。"""
+    v = os.environ.get("CALENDAR_DEDUP", "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return bool(_allowed_groups())
+
+
+_TITLE_TAG = re.compile(r"^【([^】]*)】")
+
+
+def _title_parts(title: str) -> tuple[str, str]:
+    """標題拆成（專案, 比對用的名稱）：名稱拿掉開頭的【專案｜負責人】、空白和標點。"""
+    t = str(title or "").strip()
+    m = _TITLE_TAG.match(t)
+    project = m.group(1).split("｜")[0].strip() if m else ""
+    return project, re.sub(r"[\W_]+", "", _TITLE_TAG.sub("", t)).lower()
+
+
+def _same_title(a: str, b: str) -> bool:
+    """同名：去掉標籤後相同，或 3 個字以上互相包含；兩邊都有專案標籤又不同就不算。"""
+    (pa, x), (pb, y) = _title_parts(a), _title_parts(b)
+    if not x or not y or (pa and pb and pa != pb):
+        return False
+    short, longer = sorted((x, y), key=len)
+    return x == y or (len(short) >= 3 and short in longer)
+
+
+def _ev_window(ev: dict) -> tuple[datetime, datetime]:
+    """新行程的起訖（台北時間）；整天的從第一天 00:00 到最後一天的隔天 00:00。"""
+    s, e = (datetime.fromisoformat(ev[k]) for k in ("start", "end"))
+    s, e = (TAIPEI_TZ.localize(x) if x.tzinfo is None else x.astimezone(TAIPEI_TZ) for x in (s, e))
+    if ev.get("all_day"):
+        s = s.replace(hour=0, minute=0, second=0, microsecond=0)
+        e = max(e, s).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    return s, max(e, s + timedelta(minutes=1))
+
+
+def _old_when(old: dict) -> str:
+    return f"{old['start']:%-m/%-d}（整天）" if old["all_day"] else f"{old['start']:%-m/%-d %H:%M}"
+
+
+def _find_clash(ev: dict) -> tuple[str, dict] | None:
+    """新增前比對行事曆（含同事直接寫的）：同一天同名 → ("same", 舊的)；
+    兩邊都有時間、時段重疊、名稱不同、專案沒有不同 → ("overlap", 舊的)；都沒有 → None。查不到就當沒有。"""
+    try:
+        s, e = _ev_window(ev)
+        day_start = s.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = (e - timedelta(seconds=1)).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        olds = events_between(day_start, day_end)
+    except Exception as err:
+        print(f"[DoubleA] 新增前比對行事曆失敗，照常建立：{err}")
+        return None
+    title = ev.get("title", "")
+    for o in olds:
+        if _same_title(title, o["title"]):
+            return "same", o
+    if ev.get("all_day"):
+        return None
+    project = _title_parts(title)[0]
+    for o in olds:
+        other = _title_parts(o["title"])[0]
+        if not o["all_day"] and o["start"] < e and o["end"] > s and not (project and other and project != other):
+            return "overlap", o
+    return None
+
+
+def _dedup(events: list[dict], chat_id: str) -> tuple[list[dict], list[str]]:
+    """去重（CALENDAR_DEDUP）：回 (要建的行程, 要在 LINE 告知的話)。
+    同一天已經有同名的 → 不建、告知已經登記；時段重疊但名稱不同 → 先不建，存 10 分鐘等「照樣建立」。"""
+    if not _dedup_on():
+        return events, []
+    keep, notes, waiting = [], [], []
+    for ev in events:
+        clash = _find_clash(ev)
+        if not clash:
+            keep.append(ev)
+        elif clash[0] == "same":
+            notes.append(f"🔁 {_t(clash[1]['title'])}（{_old_when(clash[1])}）已經在行事曆上了，不重複建立。")
+        else:
+            waiting.append(ev)
+            notes.append(f"⚠️ {_t(ev['title'])}：{_when(ev)} 這個時段已經有 {_t(clash[1]['title'])}"
+                         f"（{_old_when(clash[1])}），先不建，怕是同一件。")
+    if waiting:
+        save_pending_create(chat_id, waiting)
+        notes.append("不是同一件的話，10 分鐘內回「照樣建立」我就建。")
+    return keep, notes
+
+
+def _write_fail_text(e: Exception | None) -> str:
+    return _gerr(e, "⚠️ 行事曆寫入失敗，請稍後再試。") if e else "⚠️ 行事曆寫入失敗，請稍後再試。"
+
+
+def _create_and_confirm(events: list[dict], chat_id: str, notes: list[str], suffix: str,
+                        fail_text, failed_prefix: str) -> str:
+    """建立整理好（_fix_event_times、_tag_event 過）的行程，組確認訊息；文字、照片、「照樣建立」共用。
+    notes＝去重要告知的話（接在最後）；fail_text(最後的錯誤) 是全部失敗時的訊息；failed_prefix 是部分失敗那行的開頭。"""
+    invited = _invites_wife(chat_id)
+    succeeded, failed, last_err = [], [], None
+    for ev in events:
+        try:
+            created = create_calendar_event(ev, invite_wife=invited)
+            save_last_event(created["id"], ev)
+            schedule_event_reminder(chat_id, ev)
+            succeeded.append({"event_data": ev, "link": created["link"]})
+        except Exception as e:
+            print(f"[DoubleA] 行程建立失敗：{e}")
+            failed.append(ev.get("title", "未知事件"))
+            last_err = e
+    reply = ""
+    if len(events) == 1 and succeeded:
+        reply = _format_calendar_confirmation(succeeded[0]["event_data"], succeeded[0]["link"], invited) + suffix
+    elif succeeded:
+        reply = _format_multi_calendar_confirmation(succeeded, invited) + suffix
+        if failed:
+            reply += f"\n\n⚠️ {failed_prefix}{'、'.join(failed)}"
+    elif events:
+        reply = fail_text(last_err)
+    return "\n\n".join(x for x in (reply, "\n".join(notes)) if x)
+
+
+_GROUP_NAMES: dict[str, str] = {}
+
+
+def _group_name(gid: str) -> str:
+    """群組名稱（自我檢查用；查不到就寫「群組」）。"""
+    if gid not in _GROUP_NAMES:
+        if not gid.startswith("C"):
+            return "聊天室"
+        try:
+            with ApiClient(line_config) as api_client:
+                _GROUP_NAMES[gid] = MessagingApi(api_client).get_group_summary(gid).group_name
+        except Exception as e:
+            print(f"[DoubleA] 查群組名稱失敗：{e}")
+            return "群組"
+    return _GROUP_NAMES[gid]
+
+
+def _calendar_summary() -> str:
+    """自我檢查用：哪些群組能用行事曆、私訊能做什麼、重複檢查開沒開。"""
+    groups = sorted(_calendar_groups())
+    where = "、".join(f"{_group_name(g)}（…{g[-4:]}）" for g in groups) if groups else "每個群組都可以（沒設行事曆群組）"
+    dm = {"full": "可以新增", "read": "只能查", "off": "不處理"}[_calendar_mode("U")]
+    return f"群組：{where}；私訊：{dm}；重複檢查：{'開' if _dedup_on() else '關'}"
 
 
 def _fix_event_times(ev: dict) -> None:
@@ -2039,13 +2260,20 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None, use
     # 圖片＋文字說明才觸發行事曆：
     # 剛剛有傳照片、且這則文字包含觸發語 → 用那張照片建立行程，其餘文字判斷都跳過。
     if _is_calendar_trigger(text) and load_pending_image(chat_id):
-        process_image_as_calendar(chat_id, reply_token, text, user_id)
+        blocked = _calendar_block(chat_id, write=True)
+        if blocked is None:
+            process_image_as_calendar(chat_id, reply_token, text, user_id)
+        elif blocked:
+            _respond(blocked)
         return
 
     if handle_command(text, chat_id, reply_token, user_id):
         return
 
     pending = load_pending_edit(chat_id)
+    if pending and _calendar_block(chat_id, write=True) is not None:
+        clear_pending_edit(chat_id)  # 這裡不能改行事曆（選單本來就開不到這裡，保險起見）
+        pending = None
     if pending:
         clear_pending_edit(chat_id)
         if text.strip() in ("取消", "取消修改", "cancel"):
@@ -2103,6 +2331,12 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None, use
         result = {"type": "ignore"}
     msg_type = result.get("type", "ignore")
     print(f"[DoubleA] 分類：{msg_type}　{result}")
+    if msg_type in ("calendar", "edit", "delete", "modify", "query"):
+        blocked = _calendar_block(chat_id, write=msg_type != "query")
+        if blocked is not None:
+            if blocked:
+                _respond(blocked)
+            return
 
     if msg_type == "weather":
         period = result.get("period", "today")
@@ -2196,44 +2430,17 @@ def process_message(text: str, chat_id: str, reply_token: str | None = None, use
             events = [result]
         if not events:
             _respond("⚠️ 無法解析行事曆事件，請重新描述。")
-        elif len(events) == 1:
-            ev = events[0]
+            return
+        for ev in events:
             ev["description"] = text
             _fix_event_times(ev)
             _tag_event(ev, text, chat_id, user_id)
-            try:
-                created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
-                save_last_event(created["id"], ev)
-                schedule_event_reminder(chat_id, ev)
-                reply = _format_calendar_confirmation(ev, created["link"], _invites_wife(chat_id)) + f"\n\n{_cheer_calendar()}"
-            except Exception as e:
-                reply = _gerr(e, "⚠️ 行事曆寫入失敗，請稍後再試。")
-            _respond(reply)
-        else:
-            succeeded, failed = [], []
-            _last_err = None
-            for ev in events:
-                ev["description"] = text
-                _fix_event_times(ev)
-                _tag_event(ev, text, chat_id, user_id)
-                try:
-                    created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
-                    save_last_event(created["id"], ev)
-                    schedule_event_reminder(chat_id, ev)
-                    succeeded.append({"event_data": ev, "link": created["link"]})
-                except Exception as e:
-                    failed.append(ev.get("title", "未知事件"))
-                    _last_err = e
-            if succeeded:
-                reply = _format_multi_calendar_confirmation(succeeded, _invites_wife(chat_id)) + f"\n\n{_cheer_calendar()}"
-                if failed:
-                    reply += f"\n\n⚠️ 以下事件建立失敗：{'、'.join(failed)}"
-            else:
-                reply = _gerr(_last_err, "⚠️ 行事曆寫入失敗，請稍後再試。") if _last_err else "⚠️ 行事曆寫入失敗，請稍後再試。"
-            try:
-                _send_texts(chat_id, [reply], reply_token, _used_reply)
-            except Exception as _e:
-                print(f"[DoubleA] 多筆行程確認訊息送出失敗：{_e}")
+        events, notes = _dedup(events, chat_id)
+        reply = _create_and_confirm(events, chat_id, notes, f"\n\n{_cheer_calendar()}", _write_fail_text, "以下事件建立失敗：")
+        try:
+            _send_texts(chat_id, [reply], reply_token, _used_reply)
+        except Exception as _e:
+            print(f"[DoubleA] 行程確認訊息送出失敗：{_e}")
 
     elif msg_type == "todo":
         try:
@@ -2450,40 +2657,12 @@ def process_image_as_calendar(
 
     clear_pending_image(chat_id)
 
-    if len(events) == 1:
-        ev = events[0]
+    for ev in events:
         _fix_event_times(ev)
         _tag_event(ev, trigger_text or "", chat_id, user_id)
-        try:
-            created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
-            save_last_event(created["id"], ev)
-            schedule_event_reminder(chat_id, ev)
-            reply = _format_calendar_confirmation(ev, created["link"], _invites_wife(chat_id))
-            reply += f"\n\n📸 已從照片建立！"
-        except Exception as e:
-            _respond("⚠️ 偵測到行程但建立失敗，請稍後再試。")
-            return
-        _respond(reply)
-    else:
-        succeeded, failed = [], []
-        for ev in events:
-            _fix_event_times(ev)
-            _tag_event(ev, trigger_text or "", chat_id, user_id)
-            try:
-                created = create_calendar_event(ev, invite_wife=_invites_wife(chat_id))
-                save_last_event(created["id"], ev)
-                schedule_event_reminder(chat_id, ev)
-                succeeded.append({"event_data": ev, "link": created["link"]})
-            except Exception as e:
-                failed.append(ev.get("title", "未知"))
-        if succeeded:
-            reply = _format_multi_calendar_confirmation(succeeded, _invites_wife(chat_id))
-            reply += "\n\n📸 已從照片建立！"
-            if failed:
-                reply += f"\n\n⚠️ 以下建立失敗：{'、'.join(failed)}"
-            _respond(reply)
-        elif failed:
-            _respond("⚠️ 偵測到行程但建立失敗，請稍後再試。")
+    events, notes = _dedup(events, chat_id)
+    _respond(_create_and_confirm(events, chat_id, notes, "\n\n📸 已從照片建立！",
+                                 lambda e: "⚠️ 偵測到行程但建立失敗，請稍後再試。", "以下建立失敗："))
 
 
 # ── Location（記帳 GPS 附加）────────────────────────────────────────────────────

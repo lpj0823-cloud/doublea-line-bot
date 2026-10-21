@@ -170,6 +170,40 @@ def list_upcoming_events(days: int = 7) -> list[dict]:
     return events
 
 
+def events_between(start: datetime, end: datetime) -> list[dict]:
+    """start～end 之間的所有行程（同事直接寫在行事曆上的也算），新增前比對重複用。
+    回傳 [{"id", "title", "start", "end", "all_day"}]；start／end 是台北時間的 datetime，
+    整天的行程是當天 00:00 到最後一天的隔天 00:00（Google 的寫法）。"""
+    service = build("calendar", "v3", credentials=get_credentials())
+    result = (
+        service.events()
+        .list(
+            calendarId=CALENDAR_ID,
+            timeMin=start.isoformat(),
+            timeMax=end.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+
+    def _at(when: dict) -> datetime:
+        if "dateTime" in when:
+            dt = datetime.fromisoformat(when["dateTime"].replace("Z", "+00:00"))
+            return TAIPEI_TZ.localize(dt) if dt.tzinfo is None else dt.astimezone(TAIPEI_TZ)
+        d = datetime.fromisoformat(when["date"])
+        return TAIPEI_TZ.localize(datetime(d.year, d.month, d.day))
+
+    events = []
+    for item in result.get("items", []):
+        try:
+            events.append({"id": item["id"], "title": item.get("summary", "（無標題）"),
+                           "start": _at(item["start"]), "end": _at(item["end"]), "all_day": _all_day(item)})
+        except (KeyError, ValueError):
+            continue
+    return events
+
+
 def delete_event_by_id(event_id: str) -> str:
     """以 Google Calendar event ID 直接刪除事件。回傳被刪除的標題。"""
     service = build("calendar", "v3", credentials=get_credentials())

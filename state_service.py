@@ -209,3 +209,24 @@ def load_pending_image(chat_id: str) -> dict | None:
 
 def clear_pending_image(chat_id: str) -> None:
     save_state({f"pending_image_{chat_id}": None})
+
+
+# ── Pending create（時段重疊先問；回「照樣建立」才建）─────────────────────────
+
+PENDING_CREATE_TTL_SECONDS = 600  # 10 分鐘
+
+
+def save_pending_create(chat_id: str, events: list[dict]) -> None:
+    save_state({f"pending_create_{chat_id}": {"events": events, "ts": time.time()}})
+
+
+def load_pending_create(chat_id: str) -> list[dict] | None:
+    """等「照樣建立」的行程；超過 10 分鐘就不算。"""
+    val = load_state().get(f"pending_create_{chat_id}")
+    if not isinstance(val, dict) or time.time() - val.get("ts", 0) > PENDING_CREATE_TTL_SECONDS:
+        return None
+    return val.get("events") or None
+
+
+def clear_pending_create(chat_id: str) -> None:
+    save_state({f"pending_create_{chat_id}": None})
