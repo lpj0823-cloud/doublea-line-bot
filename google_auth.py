@@ -12,6 +12,14 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/tasks",
 ]
+# 公司版進度表（PROGRESS_SHEET）：只能動小幫手自己建立的檔案
+DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+
+
+def auth_scopes() -> list[str]:
+    """重新授權要請的權限：行事曆、待辦；開了進度表（PROGRESS_SHEET）再加 drive.file。"""
+    on = os.environ.get("PROGRESS_SHEET", "").strip().lower() in ("1", "true", "yes", "on")
+    return SCOPES + ([DRIVE_FILE_SCOPE] if on else [])
 
 # /reauth 網頁重新授權後，新 token 存在永久磁碟上的這個檔案，優先於環境變數使用
 TOKEN_FILE = data_path("google_token.json")
@@ -78,7 +86,7 @@ def get_credentials() -> Credentials:
             token_uri="https://oauth2.googleapis.com/token",
             client_id=token_data["client_id"],
             client_secret=token_data["client_secret"],
-            scopes=SCOPES,
+            scopes=None,  # refresh 不指定權限：拿當初授權的全部（還沒重新授權加 drive.file 時，行事曆照常）
         )
         creds.refresh(Request())
         return creds

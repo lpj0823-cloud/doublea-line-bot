@@ -93,14 +93,15 @@ target_datetime = 原本活動的時間（不知道幾點就用當天 09:00 並�
         return {"type": "ignore"}
 
 
-def parse_report_projects(report: str) -> list[str]:
-    """同事在群組貼的工作週報 → 專案名稱清單（照出現順序）；失敗回空清單。"""
-    prompt = f"""這是一位同事在 LINE 群組貼的工作週報。列出裡面每一個專案（案場）的名稱，照出現順序。
+def parse_report_items(report: str) -> list[dict]:
+    """同事在群組貼的工作週報 → [{"project": 專案名稱, "progress": 進度原文}]（照出現順序）；失敗回空清單。"""
+    prompt = f"""這是一位同事在 LINE 群組貼的工作週報。列出裡面每一個專案（案場）和它的進度，照出現順序。
 規則：
-- 只要專案名稱，不要工作項目、日期、百分比、人名
+- name：只要專案名稱，不要工作項目、日期、百分比、人名
 - 「其他」「雜項」這類不是專案，不要列
 - 名稱照原文，去掉前面的符號（✔、💡、'、-、編號）和後面的「：50%」
-- 只回傳 JSON：{{"projects": ["名稱", ...]}}，不要加任何說明或```符號
+- progress：這個專案底下（或同一行名稱後面）寫的進度，照原文抄，不要改寫、不要摘要；多行用「；」接起來，去掉每行前面的符號（-、•、✔、編號）；沒寫就給空字串
+- 只回傳 JSON：{{"projects": [{{"name": "名稱", "progress": "進度"}}, ...]}}，不要加任何說明或```符號
 
 週報：
 {report}"""
@@ -111,9 +112,19 @@ def parse_report_projects(report: str) -> list[str]:
             if text.startswith("json"):
                 text = text[4:]
         data = json.loads(text.strip())
-        return [p.strip() for p in data.get("projects", []) if isinstance(p, str) and p.strip()]
+        items = []
+        for p in data.get("projects", []):
+            name, progress = (p, "") if isinstance(p, str) else (p.get("name"), p.get("progress") or "")
+            if isinstance(name, str) and name.strip():
+                items.append({"project": name.strip(), "progress": str(progress).strip()})
+        return items
     except Exception:
         return []
+
+
+def parse_report_projects(report: str) -> list[str]:
+    """同事在群組貼的工作週報 → 專案名稱清單（照出現順序）；失敗回空清單。"""
+    return [i["project"] for i in parse_report_items(report)]
 
 
 def parse_new_datetime(text: str, current_time: datetime) -> str | None:

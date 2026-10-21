@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
-from google_auth import SCOPES, load_token_data, save_token_data
+from google_auth import auth_scopes, load_token_data, save_token_data
 
 REDIRECT_URI = "http://localhost:8765/"
 
@@ -34,7 +34,7 @@ def build_auth_url() -> str:
         "client_id": client_id,
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
-        "scope": " ".join(SCOPES),
+        "scope": " ".join(auth_scopes()),
         "access_type": "offline",
         "prompt": "consent",
     }
