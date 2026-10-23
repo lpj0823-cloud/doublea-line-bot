@@ -4,7 +4,7 @@
 使用方式：
 1. 先把 credentials.json 放在這個資料夾
 2. uv run auth_setup.py
-3. 瀏覽器會自動開啟，用 atticus.wu@gmail.com 登入並授權
+3. 瀏覽器會自動開啟，用你的 Google 帳號登入並授權
 4. 把輸出的 base64 字串貼到 Railway 的 GOOGLE_TOKEN_JSON 環境變數
 """
 

@@ -2292,7 +2292,7 @@ def _should_notify(text: str) -> bool:
 # ── Message processing ────────────────────────────────────────────────────────
 
 def process_message(text: str, chat_id: str, reply_token: str | None = None, user_id: str = "") -> None:
-    print(f"[DoubleA] 收到訊息：{text}")
+    print(f"[DoubleA] 收到訊息：{len(text)} 字")
     # 只記住群組/聊天室（C、R 開頭）；私訊（U 開頭）不覆蓋，避免排程推播被送到私訊
     if chat_id[:1] in ('C', 'R') or not load_chat_id():
         save_chat_id(chat_id)
@@ -2613,6 +2613,11 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
         except Exception as _e:
             print(f"[DoubleA] image push 最終失敗：{_e}")
 
+    allowed, limit_msg = check_rate_limit(chat_id, "image")
+    if not allowed:
+        _respond(limit_msg)
+        return
+
     try:
         image_bytes, mime_type = _download_line_content(message_id)
     except Exception as e:
@@ -2689,6 +2694,11 @@ def process_image_as_calendar(
         return
 
     message_id = pending["message_id"]
+
+    allowed, limit_msg = check_rate_limit(chat_id, "image")
+    if not allowed:
+        _respond(limit_msg)
+        return
 
     # 不再推播「⏳ 正在分析…」：每次推播到群組都會扣掉群組人數的額度。
 
@@ -2898,7 +2908,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
 
 @app.post("/morning-briefing")
-async def morning_briefing():
+async def morning_briefing(token: str = ""):
+    _check_admin_token(token)
     chat_id = load_chat_id()
     if not chat_id:
         return JSONResponse(content={"status": "no_chat_id"})
@@ -2930,7 +2941,8 @@ async def morning_briefing():
 
 
 @app.post("/daily-reminder")
-async def daily_reminder():
+async def daily_reminder(token: str = ""):
+    _check_admin_token(token)
     chat_id = load_chat_id()
     if not chat_id:
         return JSONResponse(content={"status": "no_chat_id"})
@@ -2964,7 +2976,8 @@ async def daily_reminder():
 
 
 @app.post("/check-reminders")
-async def check_reminders():
+async def check_reminders(token: str = ""):
+    _check_admin_token(token)
     now = datetime.now(TAIPEI_TZ)
     due = get_due_reminders(now)
     for r in due:
