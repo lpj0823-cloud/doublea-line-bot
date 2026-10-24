@@ -18,6 +18,7 @@
 | google_auth.py、reauth_service.py、auth_setup.py | Google 授權、網頁版重新授權、本機一次性授權 |
 | state_service.py、paths.py | 狀態與資料檔位置 |
 | progress_service.py、owners_service.py | 公司版：同事專案進度表、專案負責人 |
+| contacts_service.py | 公司版：關係人經驗名錄（「名錄 姓名：內容」記、「名錄 姓名」查；本機＋小幫手自建試算表，CONTACTS_SHEET 沒設就跟 PROGRESS_SHEET） |
 | bible_plan_service.py、proverbs_service.py、birthday_service.py | 讀經進度、箴言、生日 |
 | finance_service.py、shopping_service.py、notes_service.py | 記帳、購物清單、筆記 |
 | restaurant_service.py、weather_service.py | 附近餐廳、天氣 |
@@ -50,7 +51,7 @@
 
 ## 改程式的規矩
 - 照總指揮的流程：writing-plans → systematic-debugging → verification-before-completion。
-- 倉庫沒有測試資料夾。改完至少跑 `python -m py_compile *.py`；先在私訊自己測，不在公司群組測。
+- 測試只有 `tests/`（目前是名錄）：`python -m unittest discover -s tests -v`。改完至少跑 `python -m py_compile *.py`；先在私訊自己測，不在公司群組測。
 - 上線後開 `/selftest?token=…`，或在 Railway 跑 `python selftest.py`，全部正常才算完成。
 - 公司群組看得到的文字（行事曆標題、推播）先在私訊試；標題只用成員名字（MEMBERS），不寫同事家人的名字。
 - 合併前一定要 Justin 說可以；不刪群組資料、不改別人的行事曆、不替 Justin 發訊息給同事或家人。
