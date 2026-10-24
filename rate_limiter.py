@@ -16,6 +16,7 @@ LIMITS = {
     "ai":         {"max": 10, "window_minutes": 1},   # AI 對話：每分鐘最多10次
     "restaurant": {"max": 3,  "window_minutes": 1},   # 餐廳查詢：每分鐘最多3次
     "proverbs":   {"max": 2,  "window_minutes": 60},  # 箴言：每小時最多2次
+    "image":      {"max": 3,  "window_minutes": 1},   # 圖片辨識（Gemini，會花錢）：每分鐘最多3次
 }
 
 
@@ -53,6 +54,7 @@ def check_rate_limit(chat_id: str, action: str) -> tuple[bool, str]:
             "ai": "AI 對話",
             "restaurant": "餐廳查詢",
             "proverbs": "箴言查詢",
+            "image": "圖片辨識",
         }.get(action, action)
 
         return False, f"⚠️ {action_name}請求太頻繁，請 {wait_msg} 再試！"

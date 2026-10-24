@@ -11,7 +11,7 @@ import urllib.parse
 
 import requests
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -42,7 +42,7 @@ from calendar_service import (
 )
 from weather_service import get_current_weather, get_daily_forecast
 from event_parser import (
-    parse_image_for_event, parse_message, parse_modification, parse_new_datetime, parse_report_projects,
+    parse_image_for_event, parse_message, parse_modification, parse_new_datetime, parse_report_items,
 )
 from state_service import (
     add_reminder,
@@ -80,7 +80,12 @@ from shopping_service import (
 )
 from notes_service import add_note, delete_note_by_index, get_notes
 from owners_service import (
-    load_project_owners, projects_by_owner, remove_project_owner, set_project_owner, stale_pairs, update_from_report,
+    canonical_project, load_project_owners, match_project, projects_by_owner, remove_project_owner, set_project_owner,
+    stale_pairs, update_from_report,
+)
+from progress_service import (
+    is_stale as progress_is_stale, latest as progress_rows, record_report, remove_project as remove_progress,
+    sheet_url as progress_sheet_url, status_text as progress_status, sync as sync_progress,
 )
 from proverbs_service import get_todays_proverbs, get_proverbs_header, get_daily_verses
 from bible_plan_service import get_daily_reading, allowed_user_ids
@@ -181,7 +186,7 @@ def _group_trigger() -> str:
 # 群組裡不用叫也會處理的指令（看標準化後的文字）
 _NO_TRIGGER_COMMANDS = {"待辦", "購物清單", "筆記", "清除已買", "刪除行程", "修改行程", "選單", "群組ID", "自我檢查",
                         "重新授權", "負責清單", "負責人清單", "專案負責人", "手上的專案", "誰負責什麼",
-                        "今天天氣", "明天天氣", "這週天氣", "天氣"}
+                        "同事專案進度查詢", "今天天氣", "明天天氣", "這週天氣", "天氣"}
 _NO_TRIGGER_PREFIX = re.compile(r"^(?:\+|刪筆記\s*\d|del\s*\d|買到\s*\d|刪負責\s)")
 
 
@@ -1112,6 +1117,7 @@ def _menu_lines(lines: list[tuple[str, str]]) -> list[str]:
         shown.insert(3, "👥 專案負責人：「+負責 淡水林宅 淨雯」；「負責清單」；「刪負責 淡水林宅」")
         if _members():
             shown.append("📝 週報：第一行寫【名字】貼在群組，我會自動更新你手上的專案")
+            shown.append("📊 進度：「同事專案進度查詢」看每個人每案的最新進度")
     return shown
 
 
@@ -1153,6 +1159,8 @@ _EXACT_ALIASES: dict[str, tuple[str, ...]] = {
     "重新授權": ("重新授權", "授權", "google授權", "重新登入", "reauth"),
     "自我檢查": ("自我檢查", "自檢", "健康檢查", "系統檢查", "檢查功能", "selftest"),
     "測試週一推播": ("測試週一推播", "測試推播", "推播測試", "測試週報推播", "測試每週推播"),
+    "同事專案進度查詢": ("同事專案進度查詢", "同事專案進度", "專案進度", "專案進度表", "同事進度", "進度表", "工作進度",
+                   "同事工作進度"),
 }
 _ALIAS_LOOKUP = {a.lower(): canon for canon, alts in _EXACT_ALIASES.items() for a in alts}
 # 別名本身含「查、看、的…」這類贅字時，比對前會被去掉，所以也登記去掉贅字後的版本
@@ -1245,7 +1253,16 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
             return True
         if text.startswith("刪負責"):
             name = text[len("刪負責"):].strip()
-            _respond(f"🗑️ 已刪除：{name}" if remove_project_owner(name) else f"❓ 清單裡沒有「{name}」，傳「負責清單」看看")
+            if remove_project_owner(name):
+                _respond(f"🗑️ 已刪除：{name}")
+                if remove_progress(name):
+                    sync_progress()  # 進度表也拿掉這案
+            else:
+                _respond(f"❓ 清單裡沒有「{name}」，傳「負責清單」看看")
+            return True
+        if text.strip() == "同事專案進度查詢":
+            sync_progress()  # 先拿試算表上最新的（有人手改也看得到）；連不上就用小幫手裡的
+            _send_texts(chat_id, [_progress_text(datetime.now(TAIPEI_TZ))], reply_token, _used)
             return True
 
     # 「平安」= 今日行程 + 待辦 + 今日精選箴言（中英各 3 節）；完整功能選單改傳「選單」
@@ -1319,6 +1336,9 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
             lines = [f"🩺 自我檢查：{'全部正常 ✅' if ok else '有項目異常 ❌'}\n"]
             lines += [f"{'✅' if r['ok'] else '❌'} {r['item']}：{r['detail'][:80]}" for r in rs]
             lines.append(f"ℹ️ 行事曆：{_calendar_summary()}")
+            if _env_on("TAG_PROJECT_OWNER"):
+                sync_progress()
+                lines.append(f"ℹ️ 進度表：{progress_status()}")
             _respond("\n".join(lines))
         except Exception as e:
             _respond(f"⚠️ 自我檢查執行失敗：{type(e).__name__}")
@@ -1860,6 +1880,38 @@ def _owners_text() -> str:
     return "\n".join(lines)
 
 
+def _md(day: str) -> str:
+    try:
+        return f"{date.fromisoformat(day):%-m/%-d}"
+    except (TypeError, ValueError):
+        return day
+
+
+def _progress_text(now: datetime) -> str:
+    """「同事專案進度查詢」：每個人一段、每案「專案｜最新進度」；負責清單上還沒回報的案也列；最後附試算表連結。"""
+    by_owner: dict[str, list[dict]] = {}
+    for r in progress_rows():
+        by_owner.setdefault(r["owner"], []).append(r)
+    for owner, projects in projects_by_owner().items():
+        have = [r["project"] for r in by_owner.get(owner, [])]  # 試算表上改過名的也算有回報
+        by_owner.setdefault(owner, []).extend(
+            {"owner": owner, "project": p, "progress": "", "date": ""} for p in projects if not match_project(have, p))
+    by_owner = {o: rows for o, rows in by_owner.items() if rows}
+    if not by_owner:
+        return "📋 還沒有人回報專案進度。同事在群組貼週報（第一行寫【名字】、下面一案一行），我就會記下來。"
+    members = _members()
+    lines = [f"📋 同事專案進度（{now:%-m/%-d}）"]
+    for owner in sorted(by_owner, key=lambda o: members.index(o) if o in members else len(members)):
+        rows = by_owner[owner]
+        days = [r["date"] for r in rows if r["date"]]
+        lines.append(f"【{owner}】" + (f"最近回報 {_md(max(days))}" if days else "還沒回報過"))
+        lines.extend(f"{i}. {r['project']}｜{r['progress'] or '（還沒回報進度）'}"
+                     + ("　⚠️ 兩週沒更新" if r["date"] and progress_is_stale(r["date"]) else "")
+                     for i, r in enumerate(rows, 1))
+    url = progress_sheet_url()
+    return "\n".join(lines) + (f"\n\n📎 完整表格：{url}" if url else "")
+
+
 _REPORT_HEADER = re.compile(r"[【〔\[［(（]\s*([^】〕\]］)）]{1,8}?)\s*[】〕\]］)）]")
 
 
@@ -1902,13 +1954,17 @@ def process_report(text: str, chat_id: str, reply_token: str | None = None, user
     if not owner:
         _send_line_msg(chat_id, TextMessage(text="📝 看不出這是誰的週報，請在第一行寫【名字】，例如【淨雯】"), reply_token, [False])
         return
-    projects = parse_report_projects(text)
+    items = parse_report_items(text)
+    projects = [i["project"] for i in items]
     if not projects:
         print(f"[DoubleA] 週報沒有抓到專案：{owner}")
         return
-    added = update_from_report(owner, projects, datetime.now(TAIPEI_TZ).date().isoformat())
+    today = datetime.now(TAIPEI_TZ).date().isoformat()
+    added = update_from_report(owner, projects, today)
+    record_report(owner, [(canonical_project(i["project"]), i["progress"]) for i in items], today)
     msg = f"📝 已更新【{owner}】{len(projects)} 個專案" + (f"（新增：{'、'.join(added)}）" if added else "")
     _send_line_msg(chat_id, TextMessage(text=msg), reply_token, [False])
+    sync_progress()  # 試算表連不上也沒關係：本機已記，下次同步補上
 
 
 # 公司日曆的顏色習慣（10/19 淨雯在群組說明，也對照過公司日曆的舊行程）：紅＝會議、藍＝員工出席、綠＝出差
@@ -2236,7 +2292,7 @@ def _should_notify(text: str) -> bool:
 # ── Message processing ────────────────────────────────────────────────────────
 
 def process_message(text: str, chat_id: str, reply_token: str | None = None, user_id: str = "") -> None:
-    print(f"[DoubleA] 收到訊息：{text}")
+    print(f"[DoubleA] 收到訊息：{len(text)} 字")
     # 只記住群組/聊天室（C、R 開頭）；私訊（U 開頭）不覆蓋，避免排程推播被送到私訊
     if chat_id[:1] in ('C', 'R') or not load_chat_id():
         save_chat_id(chat_id)
@@ -2557,6 +2613,11 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
         except Exception as _e:
             print(f"[DoubleA] image push 最終失敗：{_e}")
 
+    allowed, limit_msg = check_rate_limit(chat_id, "image")
+    if not allowed:
+        _respond(limit_msg)
+        return
+
     try:
         image_bytes, mime_type = _download_line_content(message_id)
     except Exception as e:
@@ -2633,6 +2694,11 @@ def process_image_as_calendar(
         return
 
     message_id = pending["message_id"]
+
+    allowed, limit_msg = check_rate_limit(chat_id, "image")
+    if not allowed:
+        _respond(limit_msg)
+        return
 
     # 不再推播「⏳ 正在分析…」：每次推播到群組都會扣掉群組人數的額度。
 
@@ -2842,7 +2908,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
 
 @app.post("/morning-briefing")
-async def morning_briefing():
+async def morning_briefing(token: str = ""):
+    _check_admin_token(token)
     chat_id = load_chat_id()
     if not chat_id:
         return JSONResponse(content={"status": "no_chat_id"})
@@ -2874,7 +2941,8 @@ async def morning_briefing():
 
 
 @app.post("/daily-reminder")
-async def daily_reminder():
+async def daily_reminder(token: str = ""):
+    _check_admin_token(token)
     chat_id = load_chat_id()
     if not chat_id:
         return JSONResponse(content={"status": "no_chat_id"})
@@ -2908,7 +2976,8 @@ async def daily_reminder():
 
 
 @app.post("/check-reminders")
-async def check_reminders():
+async def check_reminders(token: str = ""):
+    _check_admin_token(token)
     now = datetime.now(TAIPEI_TZ)
     due = get_due_reminders(now)
     for r in due:

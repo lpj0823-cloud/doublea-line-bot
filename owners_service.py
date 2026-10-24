@@ -71,6 +71,23 @@ def projects_by_owner() -> dict[str, list[str]]:
     return grouped
 
 
+def _match_key(owners: dict, project: str) -> str | None:
+    """清單上同一個專案的名稱：只差空格、括號、一個包含另一個，或字幾乎一樣，就算同一個；沒有回 None。"""
+    return (next((k for k in owners if _norm(k) == _norm(project)), None)
+            or next((k for k in owners if _norm(project) and (_norm(k) in _norm(project) or _norm(project) in _norm(k))), None)
+            or next((k for k in owners if _similar(k, project)), None))
+
+
+def match_project(names: list[str], project: str) -> str | None:
+    """names 裡和 project 算同一個專案的那個名字（比對方式同負責清單）；沒有回 None。"""
+    return _match_key(dict.fromkeys(names), project.strip())
+
+
+def canonical_project(project: str) -> str:
+    """專案在負責清單上的寫法（進度表用同一個名字）；清單上沒有就回原名。"""
+    return _match_key(load_project_owners(), project.strip()) or project.strip()
+
+
 def update_from_report(owner: str, projects: list[str], today: str) -> list[str]:
     """同事的週報：週報裡的專案記到這個人名下、更新回報日；回傳新加進清單的專案。
     名稱和清單上的只差空格、括號、一個包含另一個，或字幾乎一樣，就算同一個專案。"""
@@ -79,9 +96,7 @@ def update_from_report(owner: str, projects: list[str], today: str) -> list[str]
     for project in (p.strip() for p in projects):
         if not project:
             continue
-        key = (next((k for k in owners if _norm(k) == _norm(project)), None)
-               or next((k for k in owners if _norm(project) and (_norm(k) in _norm(project) or _norm(project) in _norm(k))), None)
-               or next((k for k in owners if _similar(k, project)), None))
+        key = _match_key(owners, project)
         if key is None:
             owners[project], key = owner, project
             added.append(project)
