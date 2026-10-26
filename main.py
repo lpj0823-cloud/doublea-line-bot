@@ -108,7 +108,7 @@ from restaurant_service import search_nearby_restaurants, format_restaurant_resu
 from finance_service import (
     create_project, get_project, list_projects, delete_project,
     parse_expense_input, add_expense, get_expenses,
-    get_last_expense_any, attach_location, mark_photo_noted,
+    get_last_expense_any, attach_location, mark_photo_noted, recent_expense,
     format_expense_confirmation, format_photo_reminder,
     format_location_attached, format_project_list, format_project_detail,
     parse_receipt_image, format_receipt_result, add_receipt_expense,
@@ -2623,6 +2623,8 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
     要用這張照片建立行程，必須在 PENDING_IMAGE_TTL_SECONDS 秒內
     接著輸入觸發語（例如「加到行事曆」），由 process_image_as_calendar 處理。
     這樣可避免每次上傳吃飯照片都被誤判自動建立行程。
+    收據辨識只在「記帳進行中」（最近 RECEIPT_ACTIVE_DAYS 天有記帳）才做；家人一次分享很多張照片時
+    不送 Gemini、不回話，超過每分鐘上限的照片也只略過，不回「太頻繁」（10/25 培正家相簿連跳 5 則）。
     """
     print(f"[DoubleA] process_image 開始：message_id={message_id} chat_id={chat_id}")
     if chat_id[:1] in ('C', 'R') or not load_chat_id():
@@ -2630,6 +2632,9 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
     save_pending_image(chat_id, message_id)
     if not _feature_on("finance"):
         return  # 沒開記帳：照片只留給「加到行事曆」用，不辨識收據、不回話
+    recent = recent_expense(chat_id)
+    if not recent:
+        return  # 最近沒在記帳：照片只留給「加到行事曆」用，不送 Gemini、不回話
 
     _used_reply: list[bool] = [False]
 
@@ -2646,9 +2651,9 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
         except Exception as _e:
             print(f"[DoubleA] image push 最終失敗：{_e}")
 
-    allowed, limit_msg = check_rate_limit(chat_id, "image")
+    allowed, _ = check_rate_limit(chat_id, "image")
     if not allowed:
-        _respond(limit_msg)
+        print("[DoubleA] 圖片辨識超過每分鐘上限，這張略過（不回話）")
         return
 
     try:
@@ -2660,32 +2665,16 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
     # 只嘗試辨識收據／記帳提醒，不主動判斷行事曆
     try:
         receipt = parse_receipt_image(image_bytes, mime_type)
+        expense, doc_id = recent
+        project_name = expense.get("project", "")
         if "error" not in receipt and receipt.get("total", 0) > 0:
-            # 成功辨識收據 → 找最近的專案記入
-            last = get_last_expense_any(chat_id)
-            if last:
-                expense, doc_id = last
-                project_name = expense.get("project", "")
-                add_receipt_expense(receipt, project_name)
-                _respond(format_receipt_result(receipt, project_name))
-            else:
-                store = receipt.get('store', '不明')
-                total = receipt.get('total', 0)
-                _respond(
-                    f"🧾 偵測到收據！\n\n"
-                    f"🏪 {store}\n"
-                    f"💰 合計：${total:,.0f}\n\n"
-                    "⚠️ 請先建立專案再傳收據\n"
-                    "例：+專案 日本旅行 6/30-7/4"
-                )
-        else:
-            # 不是收據 → 提醒存相簿（若有進行中的記帳專案）
-            last = get_last_expense_any(chat_id)
-            if last:
-                expense, doc_id = last
-                mark_photo_noted(doc_id)
-                project_name = expense.get("project", "")
-                _respond(format_photo_reminder(expense, project_name))
+            # 成功辨識收據 → 記進正在記帳的專案
+            add_receipt_expense(receipt, project_name)
+            _respond(format_receipt_result(receipt, project_name))
+        elif not expense.get("photo_noted"):
+            # 不是收據 → 提醒存相簿（同一筆花費只提醒一次）
+            mark_photo_noted(doc_id)
+            _respond(format_photo_reminder(expense, project_name))
     except Exception as e:
         print(f"[DoubleA] 圖片處理失敗：{e}")
 
