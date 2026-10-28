@@ -17,8 +17,8 @@ DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 
 
 def auth_scopes() -> list[str]:
-    """重新授權要請的權限：行事曆、待辦；開了進度表（PROGRESS_SHEET）再加 drive.file。"""
-    on = os.environ.get("PROGRESS_SHEET", "").strip().lower() in ("1", "true", "yes", "on")
+    """重新授權要請的權限：行事曆、待辦；開了進度表（PROGRESS_SHEET）或名錄試算表（CONTACTS_SHEET）再加 drive.file。"""
+    on = any(os.environ.get(k, "").strip().lower() in ("1", "true", "yes", "on") for k in ("PROGRESS_SHEET", "CONTACTS_SHEET"))
     return SCOPES + ([DRIVE_FILE_SCOPE] if on else [])
 
 # /reauth 網頁重新授權後，新 token 存在永久磁碟上的這個檔案，優先於環境變數使用

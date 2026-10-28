@@ -3,7 +3,7 @@ import os
 
 from paths import data_path
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 from state_service import USE_FIRESTORE
@@ -274,6 +274,21 @@ def get_last_expense_any(chat_id: str) -> tuple[dict, str] | None:
     expenses.sort(key=lambda e: e.get("created_at", ""))
     latest = expenses[-1]
     return latest, latest["id"]
+
+
+RECEIPT_ACTIVE_DAYS = 3  # 最近幾天內記過帳才算「記帳進行中」，這時傳的照片才送 Gemini 辨識收據
+
+
+def recent_expense(chat_id: str, days: int = RECEIPT_ACTIVE_DAYS, now: datetime | None = None) -> tuple[dict, str] | None:
+    """最近 days 天內有記帳就回最新一筆（例如旅行記帳中）；沒記過或太久沒記帳回 None。"""
+    last = get_last_expense_any(chat_id)
+    if not last:
+        return None
+    try:
+        created = TAIPEI_TZ.localize(datetime.strptime(last[0].get("created_at", ""), "%Y-%m-%d %H:%M"))
+    except ValueError:
+        return None
+    return last if (now or datetime.now(TAIPEI_TZ)) - created <= timedelta(days=days) else None
 
 
 def attach_location(doc_id: str, title: str, lat: float, lon: float, address: str) -> None:

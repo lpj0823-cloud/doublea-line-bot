@@ -79,6 +79,11 @@ from shopping_service import (
     mark_done_by_keyword,
 )
 from notes_service import add_note, delete_note_by_index, get_notes
+from contacts_service import (
+    add_note as add_contact_note, added_text as contact_added_text, enabled as contacts_enabled, find as find_contacts,
+    format_results as contact_results, help_text as contacts_help, parse_command as parse_contacts,
+    sheet_url as contacts_sheet_url, status_text as contacts_status, sync as sync_contacts,
+)
 from owners_service import (
     canonical_project, load_project_owners, match_project, projects_by_owner, remove_project_owner, set_project_owner,
     stale_pairs, update_from_report,
@@ -103,7 +108,7 @@ from restaurant_service import search_nearby_restaurants, format_restaurant_resu
 from finance_service import (
     create_project, get_project, list_projects, delete_project,
     parse_expense_input, add_expense, get_expenses,
-    get_last_expense_any, attach_location, mark_photo_noted,
+    get_last_expense_any, attach_location, mark_photo_noted, recent_expense,
     format_expense_confirmation, format_photo_reminder,
     format_location_attached, format_project_list, format_project_detail,
     parse_receipt_image, format_receipt_result, add_receipt_expense,
@@ -156,8 +161,14 @@ def _env_on(name: str, default: str = "false") -> bool:
 
 def _feature_on(name: str) -> bool:
     """FEATURES_OFF 列出的功能就關掉（公司版用）；沒設＝全部開（家用版）。
-    可關：birthday 生日、finance 記帳與收據、restaurant 餐廳、proverb 箴言與平安、bible 讀經、share 行程確認附的分享連結。"""
+    可關：birthday 生日、finance 記帳與收據、restaurant 餐廳、proverb 箴言與平安、bible 讀經、share 行程確認附的分享連結、
+    contacts 關係人名錄（只有公司版有）。"""
     return name not in {f.strip().lower() for f in os.environ.get("FEATURES_OFF", "").split(",")}
+
+
+def _contacts_on() -> bool:
+    """關係人經驗名錄：公司版（有 ALLOWED_GROUP_ID）才有，FEATURES_OFF 列 contacts 可關。"""
+    return contacts_enabled(bool(_allowed_groups()), os.environ.get("FEATURES_OFF", ""))
 
 
 # FEATURES_OFF 關掉的功能，標準化後的指令開頭
@@ -187,7 +198,7 @@ def _group_trigger() -> str:
 _NO_TRIGGER_COMMANDS = {"待辦", "購物清單", "筆記", "清除已買", "刪除行程", "修改行程", "選單", "群組ID", "自我檢查",
                         "重新授權", "負責清單", "負責人清單", "專案負責人", "手上的專案", "誰負責什麼",
                         "同事專案進度查詢", "今天天氣", "明天天氣", "這週天氣", "天氣"}
-_NO_TRIGGER_PREFIX = re.compile(r"^(?:\+|刪筆記\s*\d|del\s*\d|買到\s*\d|刪負責\s)")
+_NO_TRIGGER_PREFIX = re.compile(r"^(?:\+|刪筆記\s*\d|del\s*\d|買到\s*\d|刪負責\s|查?名錄)")
 
 
 def _addressed_text(text: str, chat_id: str, mentioned: bool) -> str | None:
@@ -1118,6 +1129,8 @@ def _menu_lines(lines: list[tuple[str, str]]) -> list[str]:
         if _members():
             shown.append("📝 週報：第一行寫【名字】貼在群組，我會自動更新你手上的專案")
             shown.append("📊 進度：「同事專案進度查詢」看每個人每案的最新進度")
+    if _contacts_on():
+        shown.append("📇 名錄：「名錄 王○○：估驗前一週要先寄估驗表」記一筆；「名錄 王○○」查（也能查單位、標籤）")
     return shown
 
 
@@ -1265,6 +1278,23 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
             _send_texts(chat_id, [_progress_text(datetime.now(TAIPEI_TZ))], reply_token, _used)
             return True
 
+    # ── 關係人經驗名錄（公司版）：「名錄 王○○：內容」記一筆、「名錄 王○○」查 ──────────────
+    if _contacts_on():
+        cmd = parse_contacts(text)
+        if cmd:
+            kind, name, note = cmd
+            if kind == "add":
+                display = _display_name(chat_id, user_id)
+                item = add_contact_note(name, note, _member_in(display) or display or "（沒有名字）",
+                                        datetime.now(TAIPEI_TZ).date().isoformat())
+                _respond(contact_added_text(item, sync_contacts()))
+            elif kind == "find":
+                sync_contacts()  # 先拿試算表上最新的（有人手改也查得到）；連不上就用小幫手裡的
+                _send_texts(chat_id, [contact_results(name, find_contacts(name), contacts_sheet_url())], reply_token, _used)
+            else:
+                _respond(contacts_help(contacts_sheet_url()))
+            return True
+
     # 「平安」= 今日行程 + 待辦 + 今日精選箴言（中英各 3 節）；完整功能選單改傳「選單」
     if _feature_on("proverb") and _loose_match(text, "平安", 5) and "平安夜" not in text:
         _now = datetime.now(TAIPEI_TZ)
@@ -1339,6 +1369,9 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
             if _env_on("TAG_PROJECT_OWNER"):
                 sync_progress()
                 lines.append(f"ℹ️ 進度表：{progress_status()}")
+            if _contacts_on():
+                sync_contacts()
+                lines.append(f"ℹ️ 名錄：{contacts_status()}")
             _respond("\n".join(lines))
         except Exception as e:
             _respond(f"⚠️ 自我檢查執行失敗：{type(e).__name__}")
@@ -2590,6 +2623,8 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
     要用這張照片建立行程，必須在 PENDING_IMAGE_TTL_SECONDS 秒內
     接著輸入觸發語（例如「加到行事曆」），由 process_image_as_calendar 處理。
     這樣可避免每次上傳吃飯照片都被誤判自動建立行程。
+    收據辨識只在「記帳進行中」（最近 RECEIPT_ACTIVE_DAYS 天有記帳）才做；家人一次分享很多張照片時
+    不送 Gemini、不回話，超過每分鐘上限的照片也只略過，不回「太頻繁」（10/25 培正家相簿連跳 5 則）。
     """
     print(f"[DoubleA] process_image 開始：message_id={message_id} chat_id={chat_id}")
     if chat_id[:1] in ('C', 'R') or not load_chat_id():
@@ -2597,6 +2632,9 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
     save_pending_image(chat_id, message_id)
     if not _feature_on("finance"):
         return  # 沒開記帳：照片只留給「加到行事曆」用，不辨識收據、不回話
+    recent = recent_expense(chat_id)
+    if not recent:
+        return  # 最近沒在記帳：照片只留給「加到行事曆」用，不送 Gemini、不回話
 
     _used_reply: list[bool] = [False]
 
@@ -2613,9 +2651,9 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
         except Exception as _e:
             print(f"[DoubleA] image push 最終失敗：{_e}")
 
-    allowed, limit_msg = check_rate_limit(chat_id, "image")
+    allowed, _ = check_rate_limit(chat_id, "image")
     if not allowed:
-        _respond(limit_msg)
+        print("[DoubleA] 圖片辨識超過每分鐘上限，這張略過（不回話）")
         return
 
     try:
@@ -2627,32 +2665,16 @@ def process_image(message_id: str, chat_id: str, reply_token: str | None = None)
     # 只嘗試辨識收據／記帳提醒，不主動判斷行事曆
     try:
         receipt = parse_receipt_image(image_bytes, mime_type)
+        expense, doc_id = recent
+        project_name = expense.get("project", "")
         if "error" not in receipt and receipt.get("total", 0) > 0:
-            # 成功辨識收據 → 找最近的專案記入
-            last = get_last_expense_any(chat_id)
-            if last:
-                expense, doc_id = last
-                project_name = expense.get("project", "")
-                add_receipt_expense(receipt, project_name)
-                _respond(format_receipt_result(receipt, project_name))
-            else:
-                store = receipt.get('store', '不明')
-                total = receipt.get('total', 0)
-                _respond(
-                    f"🧾 偵測到收據！\n\n"
-                    f"🏪 {store}\n"
-                    f"💰 合計：${total:,.0f}\n\n"
-                    "⚠️ 請先建立專案再傳收據\n"
-                    "例：+專案 日本旅行 6/30-7/4"
-                )
-        else:
-            # 不是收據 → 提醒存相簿（若有進行中的記帳專案）
-            last = get_last_expense_any(chat_id)
-            if last:
-                expense, doc_id = last
-                mark_photo_noted(doc_id)
-                project_name = expense.get("project", "")
-                _respond(format_photo_reminder(expense, project_name))
+            # 成功辨識收據 → 記進正在記帳的專案
+            add_receipt_expense(receipt, project_name)
+            _respond(format_receipt_result(receipt, project_name))
+        elif not expense.get("photo_noted"):
+            # 不是收據 → 提醒存相簿（同一筆花費只提醒一次）
+            mark_photo_noted(doc_id)
+            _respond(format_photo_reminder(expense, project_name))
     except Exception as e:
         print(f"[DoubleA] 圖片處理失敗：{e}")
 
@@ -2882,7 +2904,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     if not (mentioned and _group_trigger()):
                         continue
                     text = "選單"
-            if _env_on("TAG_PROJECT_OWNER") and _members() and _looks_like_report(text):
+            if (_env_on("TAG_PROJECT_OWNER") and _members() and _looks_like_report(text)
+                    and not (_contacts_on() and parse_contacts(text))):  # 多行的「名錄 姓名：…」不是週報
                 background_tasks.add_task(process_report, text, chat_id, reply_token, source.get("userId", ""))
                 continue
             if source_type in ("group", "room"):
