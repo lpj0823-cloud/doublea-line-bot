@@ -26,6 +26,11 @@ def _call_claude(prompt: str) -> str:
     return message.content[0].text.strip()
 
 
+def call_claude_text(prompt: str) -> str:
+    """給其他模組用的 Claude 呼叫（例：承諾追蹤），模型同 ANTHROPIC_MODEL；回傳文字。"""
+    return _call_claude(prompt)
+
+
 def _gemini_client() -> genai.Client:
     return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
