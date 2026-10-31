@@ -1193,7 +1193,7 @@ def _menu_lines(lines: list[tuple[str, str]]) -> list[str]:
     if _contacts_on():
         shown.append("📇 名錄：「名錄 王○○：估驗前一週要先寄估驗表」記一筆；「名錄 王○○」查（也能查單位、標籤）")
     if _commitments_on():
-        shown.append("📌 承諾：群組裡有日期的承諾（例：「明天把報價寄給林先生」）我會記一句摘要，快到期時私訊提醒管理員")
+        shown.append("📌 承諾：群組裡有日期的承諾（例：「明天把報價寄給王先生」）我會記一句摘要，快到期時私訊提醒管理員")
     return shown
 
 
