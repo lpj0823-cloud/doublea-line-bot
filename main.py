@@ -90,6 +90,7 @@ from commitments_service import (
     mark_reported as mark_volunteers_reported, might_be_promise, parse_command as parse_commitments,
     reminder as commitments_reminder, status_text as commitments_status,
 )
+from usage_log import is_usage_command, summary_text as usage_summary
 from owners_service import (
     canonical_project, load_project_owners, match_project, projects_by_owner, remove_project_owner, set_project_owner,
     stale_pairs, update_from_report,
@@ -336,6 +337,9 @@ async def lifespan(_app: FastAPI):
     if _commitments_on() and _admin_user_ids():
         scheduler.add_job(commitment_reminder_job, CronTrigger(hour=8, minute=30, timezone=TAIPEI_TZ))
         jobs.append("08:30 承諾提醒（只私訊管理員）")
+    if _env_on("ENABLE_USAGE_REPORT", "true") and _admin_user_ids():
+        scheduler.add_job(usage_weekly_job, CronTrigger(day_of_week="mon", hour=8, minute=5, timezone=TAIPEI_TZ))
+        jobs.append("每週一 08:05 AI 用量週報（只私訊管理員）")
     scheduler.start()
     print(f"[DoubleA] 排程器已啟動：{'、'.join(jobs) or '無'}；資料永久保存：{is_persistent()}")
     yield
@@ -786,6 +790,19 @@ def commitment_reminder_job() -> None:
     if sent:
         mark_volunteers_reported(volunteer_ids)
         print(f"[DoubleA] 承諾提醒已私訊 {sent} 位管理員")
+
+
+def usage_weekly_job() -> None:
+    """每週一 08:05 私訊管理員：上週 AI 用量（估算，只有次數與金額，沒有對話內容）。沒有管理員就只記不推。"""
+    admins = _admin_user_ids()
+    if not admins:
+        return
+    text = usage_summary(days=7)
+    for uid in admins:
+        try:
+            _send_texts(uid, [text])
+        except Exception as e:
+            print(f"[DoubleA] AI 用量週報私訊失敗：{type(e).__name__}")
 
 
 def process_commitment(text: str, chat_id: str, user_id: str = "") -> None:
@@ -1357,6 +1374,16 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
             else:
                 _respond(contacts_help(contacts_sheet_url()))
             return True
+
+    # ── AI 用量（2026-11-04）：私訊「AI用量」看上週估算；設了 ADMIN_USER_IDS 就只給管理員 ──────────────
+    if is_usage_command(text):
+        if not chat_id.startswith("U"):
+            _respond("🔒 AI 用量請私訊我（傳「AI用量」），不在群組裡列。")
+        elif _admin_ids() and user_id not in _admin_ids():
+            _respond("🔒 AI 用量只給管理員看。")
+        else:
+            _send_texts(chat_id, [usage_summary(days=7)], reply_token, _used)
+        return True
 
     # ── 承諾追蹤（公司版）：私訊「承諾」看清單、「承諾 完成 3」結案、「承諾 取消 3」刪掉記錯的 ──────────────
     if _commitments_on():

@@ -20,6 +20,7 @@
 | progress_service.py、owners_service.py | 公司版：同事專案進度表、專案負責人 |
 | contacts_service.py | 公司版：關係人經驗名錄（「名錄 姓名：內容」記、「名錄 姓名」查；本機＋小幫手自建試算表，CONTACTS_SHEET 沒設就跟 PROGRESS_SHEET） |
 | commitments_service.py | 公司版：承諾追蹤（群組沒叫小幫手的句子先關鍵字篩、像承諾才送 Claude 摘一句；每天 08:30 只私訊 ADMIN_USER_IDS；私訊「承諾」看清單、「承諾 完成 3」結案） |
+| usage_log.py | AI 用量週報（2026-11-04）：每次呼叫 Claude／Gemini 成功後記 token 與估算美元到 /data/ai_usage.jsonl（不記內容）；每週一 08:05 私訊 ADMIN_USER_IDS，私訊「AI用量」可查；ENABLE_USAGE_REPORT=false 可關週報 |
 | bible_plan_service.py、proverbs_service.py、birthday_service.py | 讀經進度、箴言、生日 |
 | finance_service.py、shopping_service.py、notes_service.py | 記帳、購物清單、筆記 |
 | restaurant_service.py、weather_service.py | 附近餐廳、天氣 |
