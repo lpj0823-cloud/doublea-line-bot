@@ -561,6 +561,8 @@ def parse_receipt_image(image_bytes: bytes, mime_type: str) -> dict:
                 types.Part.from_text(text=prompt),
             ],
         )
+        import usage_log  # AI 用量週報：記 token（不記收據內容）
+        usage_log.record("gemini", "gemini-2.5-flash", "Gemini 收據", *usage_log.gemini_tokens(response))
 
         text = response.text.strip()
         if text.startswith("```"):

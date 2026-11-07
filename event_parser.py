@@ -6,6 +6,8 @@ import anthropic
 from google import genai
 from google.genai import types
 
+import usage_log  # AI 用量週報：呼叫成功後記 token（不記內容）
+
 # 可用環境變數 ANTHROPIC_MODEL 覆寫。預設用目前有效的模型；
 # 原本寫死的 "claude-sonnet-4-6" 並非有效的模型 ID，會導致每次呼叫都失敗。
 # 目前可用選項（2026-09）：claude-haiku-4-5-20251001（便宜快速）、claude-sonnet-5（品質較高）。
@@ -23,7 +25,13 @@ def _call_claude(prompt: str) -> str:
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )
+    usage_log.record("anthropic", ANTHROPIC_MODEL, "Claude 文字", *usage_log.claude_tokens(message))
     return message.content[0].text.strip()
+
+
+def call_claude_text(prompt: str) -> str:
+    """給其他模組用的 Claude 呼叫（例：承諾追蹤），模型同 ANTHROPIC_MODEL；回傳文字。"""
+    return _call_claude(prompt)
 
 
 def _gemini_client() -> genai.Client:
@@ -219,6 +227,7 @@ def parse_image_for_event(
             thinking_config=types.ThinkingConfig(thinking_budget=0),
         ),
     )
+    usage_log.record("gemini", "gemini-2.5-flash", "Gemini 看照片", *usage_log.gemini_tokens(response))
     try:
         return json.loads(response.text.strip())
     except Exception:

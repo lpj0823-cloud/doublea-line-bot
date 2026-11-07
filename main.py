@@ -42,7 +42,7 @@ from calendar_service import (
 )
 from weather_service import get_current_weather, get_daily_forecast
 from event_parser import (
-    parse_image_for_event, parse_message, parse_modification, parse_new_datetime, parse_report_items,
+    call_claude_text, parse_image_for_event, parse_message, parse_modification, parse_new_datetime, parse_report_items,
 )
 from state_service import (
     add_reminder,
@@ -84,6 +84,13 @@ from contacts_service import (
     format_results as contact_results, help_text as contacts_help, parse_command as parse_contacts,
     sheet_url as contacts_sheet_url, status_text as contacts_status, sync as sync_contacts,
 )
+from commitments_service import (
+    add_items as add_commitments, enabled as commitments_enabled, extract as extract_commitments,
+    help_text as commitments_help, list_text as commitments_list, mark as mark_commitment,
+    mark_reported as mark_volunteers_reported, might_be_promise, parse_command as parse_commitments,
+    reminder as commitments_reminder, status_text as commitments_status,
+)
+from usage_log import is_usage_command, summary_text as usage_summary
 from owners_service import (
     canonical_project, load_project_owners, match_project, projects_by_owner, remove_project_owner, set_project_owner,
     stale_pairs, update_from_report,
@@ -162,13 +169,18 @@ def _env_on(name: str, default: str = "false") -> bool:
 def _feature_on(name: str) -> bool:
     """FEATURES_OFF 列出的功能就關掉（公司版用）；沒設＝全部開（家用版）。
     可關：birthday 生日、finance 記帳與收據、restaurant 餐廳、proverb 箴言與平安、bible 讀經、share 行程確認附的分享連結、
-    contacts 關係人名錄（只有公司版有）。"""
+    contacts 關係人名錄、commitments 承諾追蹤（這兩個只有公司版有）。"""
     return name not in {f.strip().lower() for f in os.environ.get("FEATURES_OFF", "").split(",")}
 
 
 def _contacts_on() -> bool:
     """關係人經驗名錄：公司版（有 ALLOWED_GROUP_ID）才有，FEATURES_OFF 列 contacts 可關。"""
     return contacts_enabled(bool(_allowed_groups()), os.environ.get("FEATURES_OFF", ""))
+
+
+def _commitments_on() -> bool:
+    """承諾追蹤：公司版（有 ALLOWED_GROUP_ID）才有，FEATURES_OFF 列 commitments 可關。"""
+    return commitments_enabled(bool(_allowed_groups()), os.environ.get("FEATURES_OFF", ""))
 
 
 # FEATURES_OFF 關掉的功能，標準化後的指令開頭
@@ -187,6 +199,11 @@ def _feature_off_command(text: str) -> bool:
 def _admin_ids() -> set[str]:
     """ADMIN_USER_IDS：能用「重新授權」的人（LINE 使用者 ID，逗號分隔，私訊傳「群組ID」可查自己的）；沒設＝不限（家用版）。"""
     return {u.strip() for u in os.environ.get("ADMIN_USER_IDS", "").split(",") if u.strip()}
+
+
+def _admin_user_ids() -> list[str]:
+    """ADMIN_USER_IDS 裡真的是個人 ID（U 開頭）的：承諾提醒只私訊這些人，就算誤填群組 ID 也不會推到群組。"""
+    return sorted(u for u in _admin_ids() if u.startswith("U"))
 
 
 def _group_trigger() -> str:
@@ -317,6 +334,12 @@ async def lifespan(_app: FastAPI):
         day, hour, minute = weekly
         scheduler.add_job(weekly_push_job, CronTrigger(day_of_week=day, hour=hour, minute=minute, timezone=TAIPEI_TZ))
         jobs.append(f"每週{_WEEKDAYS[day]} {hour:02d}:{minute:02d} 固定推播")
+    if _commitments_on() and _admin_user_ids():
+        scheduler.add_job(commitment_reminder_job, CronTrigger(hour=8, minute=30, timezone=TAIPEI_TZ))
+        jobs.append("08:30 承諾提醒（只私訊管理員）")
+    if _env_on("ENABLE_USAGE_REPORT", "true") and _admin_user_ids():
+        scheduler.add_job(usage_weekly_job, CronTrigger(day_of_week="mon", hour=8, minute=5, timezone=TAIPEI_TZ))
+        jobs.append("每週一 08:05 AI 用量週報（只私訊管理員）")
     scheduler.start()
     print(f"[DoubleA] 排程器已啟動：{'、'.join(jobs) or '無'}；資料永久保存：{is_persistent()}")
     yield
@@ -746,6 +769,61 @@ def weekly_push_job() -> None:
         print(f"[DoubleA] 每週推播失敗：{e}")
 
 
+# ── 承諾追蹤（公司版）────────────────────────────────────────────────────────────
+# 群組裡沒叫小幫手、但像「答應在某日前做某事」的句子，送 Claude 摘一句記下來；每天 08:30 只私訊管理員。
+
+def commitment_reminder_job() -> None:
+    """（公司版）每天 08:30 私訊管理員：過期、今天、兩天內到期的承諾和新的主動補位；沒事就不推，也從不推到群組。"""
+    admins = _admin_user_ids()
+    if not admins:
+        return  # 沒有管理員 ID：只記不推
+    text, volunteer_ids = commitments_reminder(datetime.now(TAIPEI_TZ).date())
+    if not text:
+        return
+    sent = 0
+    for uid in admins:
+        try:
+            _send_texts(uid, [text])
+            sent += 1
+        except Exception as e:
+            print(f"[DoubleA] 承諾提醒私訊失敗：{type(e).__name__}")
+    if sent:
+        mark_volunteers_reported(volunteer_ids)
+        print(f"[DoubleA] 承諾提醒已私訊 {sent} 位管理員")
+
+
+def usage_weekly_job() -> None:
+    """每週一 08:05 私訊管理員：上週 AI 用量（估算，只有次數與金額，沒有對話內容）。沒有管理員就只記不推。"""
+    admins = _admin_user_ids()
+    if not admins:
+        return
+    text = usage_summary(days=7)
+    for uid in admins:
+        try:
+            _send_texts(uid, [text])
+        except Exception as e:
+            print(f"[DoubleA] AI 用量週報私訊失敗：{type(e).__name__}")
+
+
+def process_commitment(text: str, chat_id: str, user_id: str = "") -> None:
+    """群組裡沒叫小幫手、但像承諾的句子（公司版）：限流 → 送 Claude 摘一句 → 記進承諾清單。
+    不回群組；不存原文；log 只印筆數和錯誤類型（不印訊息內容）。"""
+    allowed, _ = check_rate_limit(chat_id, "commitment")
+    if not allowed:
+        print("[DoubleA] 承諾追蹤：這小時送 AI 的次數到上限，略過一則")
+        return
+    display = _display_name(chat_id, user_id)
+    now = datetime.now(TAIPEI_TZ)
+    try:
+        items = extract_commitments(text, _member_in(display) or display, now, call_claude_text)
+        added = add_commitments(items, now.date().isoformat())
+    except Exception as e:
+        print(f"[DoubleA] 承諾追蹤失敗：{type(e).__name__}")
+        return
+    if items:
+        print(f"[DoubleA] 承諾追蹤：判斷出 {len(items)} 筆、新記 {len(added)} 筆")
+
+
 def _weekly_test_text() -> str:
     """「測試週一推播」：私訊看週一要推到群組的內容，並請 LINE 驗證格式（validate，不會真的發出去）。"""
     target = _push_target()
@@ -1131,6 +1209,8 @@ def _menu_lines(lines: list[tuple[str, str]]) -> list[str]:
             shown.append("📊 進度：「同事專案進度查詢」看每個人每案的最新進度")
     if _contacts_on():
         shown.append("📇 名錄：「名錄 王○○：估驗前一週要先寄估驗表」記一筆；「名錄 王○○」查（也能查單位、標籤）")
+    if _commitments_on():
+        shown.append("📌 承諾：群組裡有日期的承諾（例：「明天把報價寄給王先生」）我會記一句摘要，快到期時私訊提醒管理員")
     return shown
 
 
@@ -1295,6 +1375,38 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
                 _respond(contacts_help(contacts_sheet_url()))
             return True
 
+    # ── AI 用量（2026-11-04）：私訊「AI用量」看上週估算；設了 ADMIN_USER_IDS 就只給管理員 ──────────────
+    if is_usage_command(text):
+        if not chat_id.startswith("U"):
+            _respond("🔒 AI 用量請私訊我（傳「AI用量」），不在群組裡列。")
+        elif _admin_ids() and user_id not in _admin_ids():
+            _respond("🔒 AI 用量只給管理員看。")
+        else:
+            _send_texts(chat_id, [usage_summary(days=7)], reply_token, _used)
+        return True
+
+    # ── 承諾追蹤（公司版）：私訊「承諾」看清單、「承諾 完成 3」結案、「承諾 取消 3」刪掉記錯的 ──────────────
+    if _commitments_on():
+        cmd = parse_commitments(text)
+        if cmd:
+            kind, num = cmd
+            if not chat_id.startswith("U"):
+                _respond("🔒 承諾清單請私訊我（傳「承諾」），不在群組裡列。")
+            elif _admin_ids() and user_id not in _admin_ids():
+                _respond("🔒 承諾清單只給管理員看。")
+            elif kind == "list":
+                _send_texts(chat_id, [commitments_list(datetime.now(TAIPEI_TZ).date())], reply_token, _used)
+            elif kind in ("done", "cancel"):
+                item = mark_commitment(num, "done" if kind == "done" else "cancelled",
+                                       datetime.now(TAIPEI_TZ).date().isoformat())
+                if item:
+                    _respond(f"{'✅ 已結案' if kind == 'done' else '🗑️ 已取消'}：{item['id']}. {item['who']}：{item['what']}")
+                else:
+                    _respond(f"❓ 找不到還沒結案的第 {num} 件，傳「承諾」看清單")
+            else:
+                _respond(commitments_help())
+            return True
+
     # 「平安」= 今日行程 + 待辦 + 今日精選箴言（中英各 3 節）；完整功能選單改傳「選單」
     if _feature_on("proverb") and _loose_match(text, "平安", 5) and "平安夜" not in text:
         _now = datetime.now(TAIPEI_TZ)
@@ -1372,6 +1484,9 @@ def handle_command(text: str, chat_id: str, reply_token: str | None = None, user
             if _contacts_on():
                 sync_contacts()
                 lines.append(f"ℹ️ 名錄：{contacts_status()}")
+            if _commitments_on():
+                lines.append("ℹ️ 承諾追蹤：" + commitments_status(datetime.now(TAIPEI_TZ).date(), bool(_group_trigger()),
+                                                             bool(_admin_user_ids())))
             _respond("\n".join(lines))
         except Exception as e:
             _respond(f"⚠️ 自我檢查執行失敗：{type(e).__name__}")
@@ -2909,9 +3024,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 background_tasks.add_task(process_report, text, chat_id, reply_token, source.get("userId", ""))
                 continue
             if source_type in ("group", "room"):
-                text = _addressed_text(text, chat_id, mentioned)
-                if text is None:
+                addressed = _addressed_text(text, chat_id, mentioned)
+                if addressed is None:  # 沒叫小幫手：不回話；公司版像承諾的句子才送 AI 摘一句
+                    if _commitments_on() and might_be_promise(text):
+                        background_tasks.add_task(process_commitment, text, chat_id, source.get("userId", ""))
                     continue
+                text = addressed
             if _feature_on("bible") and _is_bible_reading_cmd(text):
                 background_tasks.add_task(process_bible_reading, source.get("userId", ""), chat_id, reply_token)
                 continue
@@ -3123,7 +3241,10 @@ def privacy():
             f"<h1>隱私權政策</h1>\n<p>{BOT_NAME}（下稱「本服務」）是僅供團隊成員使用的內部 LINE 機器人，不對外公開招募使用者，也不會將任何資料提供、販售或分享給無關第三方。</p>\n"
             "<h2>蒐集的資料</h2>\n<p>本服務會處理成員在 LINE 對話中主動提供的文字與照片，用於建立行事曆事件、待辦事項、筆記與採購清單，並經授權存取團隊的 Google 日曆與 Google Tasks 以完成上述功能。</p>\n"
             "<h2>資料儲存與使用</h2>\n<p>相關資料僅儲存於本服務的雲端磁碟與團隊授權的 Google 帳號（日曆／Tasks）中，僅用於提供上述功能，不做其他用途。</p>\n"
-            "<h2>聯絡方式</h2>\n<p>如有任何問題，請透過 LINE 直接聯繫本服務管理者。</p>", f"隱私權政策 － {BOT_NAME}")
+            + ("<h2>承諾追蹤</h2>\n<p>為了不漏掉答應客戶的事，群組裡沒有叫本服務、但像「答應在某日前做某事」的訊息，會先用關鍵字篩選，"
+               "再交給 AI（Anthropic Claude）整理成一句摘要（誰、做什麼、給誰、期限）存在本服務的雲端磁碟，不保存訊息原文；"
+               "到期提醒只私訊管理者，不在群組發言。</p>\n" if _commitments_on() else "")
+            + "<h2>聯絡方式</h2>\n<p>如有任何問題，請透過 LINE 直接聯繫本服務管理者。</p>", f"隱私權政策 － {BOT_NAME}")
     return """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <title>隱私權政策 － 培正家AI小幫手</title></head><body style="font-family:sans-serif;max-width:600px;margin:40px auto;line-height:1.7">
 <h1>隱私權政策</h1>

@@ -19,6 +19,8 @@
 | state_service.py、paths.py | 狀態與資料檔位置 |
 | progress_service.py、owners_service.py | 公司版：同事專案進度表、專案負責人 |
 | contacts_service.py | 公司版：關係人經驗名錄（「名錄 姓名：內容」記、「名錄 姓名」查；本機＋小幫手自建試算表，CONTACTS_SHEET 沒設就跟 PROGRESS_SHEET） |
+| commitments_service.py | 公司版：承諾追蹤（群組沒叫小幫手的句子先關鍵字篩、像承諾才送 Claude 摘一句；每天 08:30 只私訊 ADMIN_USER_IDS；私訊「承諾」看清單、「承諾 完成 3」結案） |
+| usage_log.py | AI 用量週報（2026-11-04）：每次呼叫 Claude／Gemini 成功後記 token 與估算美元到 /data/ai_usage.jsonl（不記內容）；每週一 08:05 私訊 ADMIN_USER_IDS，私訊「AI用量」可查；ENABLE_USAGE_REPORT=false 可關週報 |
 | bible_plan_service.py、proverbs_service.py、birthday_service.py | 讀經進度、箴言、生日 |
 | finance_service.py、shopping_service.py、notes_service.py | 記帳、購物清單、筆記 |
 | restaurant_service.py、weather_service.py | 附近餐廳、天氣 |
@@ -51,7 +53,7 @@
 
 ## 改程式的規矩
 - 照總指揮的流程：writing-plans → systematic-debugging → verification-before-completion。
-- 測試只有 `tests/`（目前是名錄）：`python -m unittest discover -s tests -v`。改完至少跑 `python -m py_compile *.py`；先在私訊自己測，不在公司群組測。
+- 測試只有 `tests/`（目前是名錄、承諾追蹤、記帳）：`python -m unittest discover -s tests -v`。改完至少跑 `python -m py_compile *.py`；先在私訊自己測，不在公司群組測。
 - 上線後開 `/selftest?token=…`，或在 Railway 跑 `python selftest.py`，全部正常才算完成。
 - 公司群組看得到的文字（行事曆標題、推播）先在私訊試；標題只用成員名字（MEMBERS），不寫同事家人的名字。
 - 合併前一定要 Justin 說可以；不刪群組資料、不改別人的行事曆、不替 Justin 發訊息給同事或家人。
